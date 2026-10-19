@@ -63,3 +63,7 @@ wandb/
 
 # Logs
 *.log
+
+# Preparation reports and processed datasets (personal data - never commit)
+reports/
+data/processed/
