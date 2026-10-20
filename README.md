@@ -133,6 +133,19 @@ PYTHONPATH=src python -m chessmovenet.train \
 # Replace outputs from a previous run:
 PYTHONPATH=src python -m chessmovenet.train --epochs 3 --overwrite
 
+# Plot training history (Step 12) -- generates reports/loss_curves.png and
+# reports/accuracy_curves.png from the .npz history file.  Defaults to the
+# 15-epoch history produced above; pass a different path to plot another run.
+PYTHONPATH=src python scripts/plot_history.py
+PYTHONPATH=src python scripts/plot_history.py artifacts/history_ep15.npz
+
+# How to read the graphs:
+# - Loss curves: train and val loss should both trend downward.  If val loss
+#   stops improving while train loss keeps dropping, the model is overfitting.
+# - Accuracy curves: top-1 and top-5 are percentages (0..100).  Higher is better.
+#   Top-5 > top-1 means the correct move was usually among the top few guesses
+#   even when it wasn't the #1 pick.
+
 # Reload a trained checkpoint for inference (no retraining):
 PYTHONPATH=src python - <<'EOF'
 import numpy as np
