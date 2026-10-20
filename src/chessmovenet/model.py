@@ -6,8 +6,8 @@ per move class (see :mod:`chessmovenet.moves`).  Only NumPy is used —
 every line below is the honest arithmetic that ML frameworks normally
 hide behind their own abstractions.
 
-Architecture
-------------
+Default architecture
+--------------------
 
 ::
 
@@ -63,8 +63,9 @@ opinion, and a caller that needs playable moves must combine it with a
 legality check.  This module deliberately stays chess-agnostic — it
 only ever sees vectors of numbers.
 
-Not in this module (future phases): backpropagation, loss functions, a
-training loop, and saving/loading weights.
+The hidden layer count and widths can be changed with ``hidden_sizes``.
+The default remains one 256-unit hidden layer. Backpropagation is implemented
+here; training and checkpoint handling live in their own modules.
 """
 
 from __future__ import annotations
@@ -156,22 +157,23 @@ def softmax(logits: np.ndarray) -> np.ndarray:
 
 
 class ChessMoveNet:
-    """Two-layer fully connected network: 781 -> 256 (ReLU) -> 4272.
+    """Fully connected classifier with configurable hidden layer widths.
 
-    The four parameter arrays are plain, public NumPy attributes so a
-    future training phase (backpropagation and gradient updates —
-    deliberately *not* implemented here) can read and adjust them
-    directly without any accessor machinery.
+    The numbered weight and bias arrays are plain, public NumPy attributes so
+    training and checkpoint code can read and adjust them directly. The
+    default model has ``W1``,
+    ``b1``, ``W2``, and ``b2``; deeper models add matching numbered arrays.
 
     Attributes:
         input_size: Features per position (default 781).
         hidden_size: Hidden neurons (default 256).
         output_size: Move classes (default 4272).
-        W1: Hidden-layer weights, shape ``(input_size, hidden_size)`` =
+        W1: First hidden-layer weights, shape ``(input_size, hidden_size)`` =
             ``(781, 256)``, float32, He-initialized.
         b1: Hidden-layer biases, shape ``(hidden_size,)`` = ``(256,)``,
             float32, zeros.
-        W2: Output-layer weights, shape ``(hidden_size, output_size)``
+        W2: Output weights for the default single-hidden-layer model, shape
+            ``(hidden_size, output_size)``
             = ``(256, 4272)``, float32, He-initialized.
         b2: Output-layer biases, shape ``(output_size,)`` = ``(4272,)``,
             float32, zeros.
@@ -184,29 +186,37 @@ class ChessMoveNet:
         output_size: int = OUTPUT_SIZE,
         seed: int | None = None,
         activation: str = "relu",
+        hidden_sizes: tuple[int, ...] | list[int] | None = None,
     ) -> None:
         """Create the network and initialize its parameters.
 
         Args:
             input_size: Number of input features per position.
-            hidden_size: Number of neurons in the hidden layer.
+            hidden_size: Number of neurons in the single hidden layer. Kept as
+                a convenient shorthand and for compatibility with older calls.
             output_size: Number of output move classes.
             seed: Optional integer seed for reproducible weights.  The
                 same seed always produces the same initial weights;
                 ``None`` gives fresh random weights each time.
             activation: Hidden-layer activation: ``"relu"`` (default),
                 ``"sigmoid"``, or ``"tanh"``.
+            hidden_sizes: Optional widths for one or more hidden layers, e.g.
+                ``(128, 64)``. If supplied, this takes precedence over
+                ``hidden_size``.
 
         Raises:
             TypeError: If a size is not an integer.
             ValueError: If a size is less than 1.
         """
         # --- Sizes: small guards so mistakes surface immediately ---
-        for name, value in (
-            ("input_size", input_size),
-            ("hidden_size", hidden_size),
-            ("output_size", output_size),
-        ):
+        if hidden_sizes is None:
+            hidden_sizes = (hidden_size,)
+        elif not isinstance(hidden_sizes, (tuple, list)) or not hidden_sizes:
+            raise ValueError("hidden_sizes must be a non-empty list or tuple")
+        else:
+            hidden_sizes = tuple(hidden_sizes)
+
+        for name, value in (("input_size", input_size), ("output_size", output_size)):
             is_int = isinstance(value, (int, np.integer))
             if isinstance(value, bool) or not is_int:
                 raise TypeError(
@@ -214,10 +224,28 @@ class ChessMoveNet:
                 )
             if value < 1:
                 raise ValueError(f"{name} must be at least 1, got {value}")
+        for index, value in enumerate(hidden_sizes):
+            is_int = isinstance(value, (int, np.integer))
+            if isinstance(value, bool) or not is_int:
+                raise TypeError(
+                    f"hidden_sizes[{index}] must be an integer, "
+                    f"got {type(value).__name__}"
+                )
+            if value < 1:
+                raise ValueError(
+                    f"hidden_sizes[{index}] must be at least 1, got {value}"
+                )
 
         self.input_size = int(input_size)
-        self.hidden_size = int(hidden_size)
+        self.hidden_sizes = tuple(int(width) for width in hidden_sizes)
+        self.hidden_size = self.hidden_sizes[0]
         self.output_size = int(output_size)
+        self.layer_sizes = (self.input_size, *self.hidden_sizes, self.output_size)
+        self.parameter_names = tuple(
+            name
+            for layer in range(1, len(self.layer_sizes))
+            for name in (f"W{layer}", f"b{layer}")
+        )
         if not isinstance(activation, str):
             raise TypeError(
                 f"activation must be a string, got {type(activation).__name__}"
@@ -240,26 +268,18 @@ class ChessMoveNet:
         # typical size of activations stable from layer to layer (see
         # the module docstring).  astype(np.float32) matches the dtype
         # of encode_board's output, keeping all arithmetic in float32.
-        hidden_scale = np.sqrt(
-            (2.0 if self.activation == "relu" else 1.0) / self.input_size
-        )
-        self.W1 = rng.normal(
-            0.0,
-            hidden_scale,
-            size=(self.input_size, self.hidden_size),
-        ).astype(np.float32)  # (781, 256)
-
-        # Zero biases: a neutral, symmetric start — no neuron and no
-        # output class is favored before training.
-        self.b1 = np.zeros(self.hidden_size, dtype=np.float32)  # (256,)
-
-        self.W2 = rng.normal(
-            0.0,
-            np.sqrt(2.0 / self.hidden_size),
-            size=(self.hidden_size, self.output_size),
-        ).astype(np.float32)  # (256, 4272)
-
-        self.b2 = np.zeros(self.output_size, dtype=np.float32)  # (4272,)
+        for layer, (fan_in, fan_out) in enumerate(
+            zip(self.layer_sizes[:-1], self.layer_sizes[1:]), start=1
+        ):
+            scale = np.sqrt(
+                (2.0 if self.activation == "relu" else 1.0) / fan_in
+            )
+            weight = rng.normal(0.0, scale, size=(fan_in, fan_out)).astype(
+                np.float32
+            )
+            bias = np.zeros(fan_out, dtype=np.float32)
+            setattr(self, f"W{layer}", weight)
+            setattr(self, f"b{layer}", bias)
 
     def _check_input(self, X: np.ndarray) -> np.ndarray:
         """Convert ``X`` to float32 and validate its shape.
@@ -348,7 +368,7 @@ class ChessMoveNet:
         The arithmetic itself lives in :meth:`_forward_with_cache` so
         that :meth:`backward` reuses exactly the same calculations.
         """
-        _, _, _, logits, single = self._forward_with_cache(X)
+        _, _, logits, single = self._forward_with_cache(X)
 
         output = softmax(logits) if apply_softmax else logits
 
@@ -357,7 +377,7 @@ class ChessMoveNet:
 
     def _forward_with_cache(
         self, X: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, bool]:
+    ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, bool]:
         """Run the forward pass, keeping every intermediate value.
 
         This is the single place where the network's arithmetic lives;
@@ -369,26 +389,26 @@ class ChessMoveNet:
             X: Board features of shape ``(781,)`` or ``(N, 781)``.
 
         Returns:
-            ``(X2d, Z1, A1, logits, single)``: the input as a 2-D
-            ``(N, 781)`` array, the hidden pre-activations ``(N, 256)``
-            and activations ``(N, 256)``, the logits ``(N, 4272)``,
-            and ``single`` — whether the caller passed one position
-            (so public methods know to drop the batch axis again).
+            ``(X2d, activations, logits, single)``. Activations includes
+            the input followed by every hidden-layer output; ``single`` says
+            whether the caller passed one position.
         """
         X = self._check_input(X)
         single = X.ndim == 1
         if single:
             X = X[np.newaxis, :]  # (781,) -> (1, 781): treat as batch of 1
 
-        # The heart of the network: two matrix multiplications with a
-        # ReLU in between.  ``@`` is NumPy's matrix multiply, and the
-        # (256,) / (4272,) bias vectors are automatically added to
-        # every one of the N rows via broadcasting.
-        Z1 = X @ self.W1 + self.b1  # (N,781)@(781,256)+(256,) = (N,256)
-        A1 = self._activate(Z1)  # (N, 256)
-        # (N,256)@(256,4272)+(4272,) = (N, 4272)
-        logits = A1 @ self.W2 + self.b2
-        return X, Z1, A1, logits, single
+        activations = [X]
+        for layer in range(1, len(self.layer_sizes) - 1):
+            z = activations[-1] @ getattr(self, f"W{layer}") + getattr(
+                self, f"b{layer}"
+            )
+            activations.append(self._activate(z))
+        output_layer = len(self.layer_sizes) - 1
+        logits = activations[-1] @ getattr(self, f"W{output_layer}") + getattr(
+            self, f"b{output_layer}"
+        )
+        return X, activations, logits, single
 
     def _activate(self, z: np.ndarray) -> np.ndarray:
         """Apply this network's configured hidden-layer activation."""
@@ -504,7 +524,7 @@ class ChessMoveNet:
             ValueError: If ``X`` or ``labels`` have invalid shapes, or
                 a label is outside ``0 .. output_size - 1``.
         """
-        X2d, Z1, A1, logits, _single = self._forward_with_cache(X)
+        X2d, activations, logits, _single = self._forward_with_cache(X)
         labels = self._check_labels(labels, X2d.shape[0])
         n = X2d.shape[0]
 
@@ -520,23 +540,26 @@ class ChessMoveNet:
         # --- Step 2: output-layer gradients ------------------------------
         # Same outer-product pattern as the forward matrix multiply,
         # with the operand order swapped and one side transposed.
-        dW2 = A1.T @ dlogits  # (256,N) @ (N,4272) = (256, 4272)
-        db2 = dlogits.sum(axis=0)  # (4272,) — summed over the batch
+        gradients: dict[str, np.ndarray] = {}
+        output_layer = len(self.layer_sizes) - 1
+        d_activation = dlogits
+        for layer in range(output_layer, 0, -1):
+            previous_activation = activations[layer - 1]
+            gradients[f"W{layer}"] = previous_activation.T @ d_activation
+            gradients[f"b{layer}"] = d_activation.sum(axis=0)
+            d_previous = d_activation @ getattr(self, f"W{layer}").T
+            if layer > 1:
+                # The cached post-activation is enough to compute each
+                # supported derivative; recover the pre-activation from
+                # the layer's cached input and weights for clarity.
+                previous_z = activations[layer - 2] @ getattr(
+                    self, f"W{layer - 1}"
+                ) + getattr(self, f"b{layer - 1}")
+                d_activation = d_previous * self._activation_derivative(
+                    previous_z, previous_activation
+                )
 
-        # --- Step 3: push the gradient back through W2 -------------------
-        # "Which combination of hidden activations produced this error?"
-        dA1 = dlogits @ self.W2.T  # (N,4272) @ (4272,256) = (N, 256)
-
-        # --- Step 4: back through the ReLU -------------------------------
-        # The ReLU derivative is 1 where Z1 > 0 and 0 elsewhere: a unit
-        # that stayed switched off cannot pass any gradient upstream.
-        dZ1 = dA1 * self._activation_derivative(Z1, A1)  # (N, 256)
-
-        # --- Step 5: hidden-layer gradients ------------------------------
-        dW1 = X2d.T @ dZ1  # (781,N) @ (N,256) = (781, 256)
-        db1 = dZ1.sum(axis=0)  # (256,)
-
-        return {"W1": dW1, "b1": db1, "W2": dW2, "b2": db2}
+        return gradients
 
     def predict(self, X: np.ndarray):
         """Return the most probable move class and its probability.

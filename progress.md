@@ -63,7 +63,8 @@ PYTHONPATH=src python scripts/evaluate_checkpoint.py \
   `--optimizer adam`.
 - **Sigmoid and Tanh:** implemented in `model.py`, including their
   backpropagation derivatives; choose an activation with `--activation`.
-- A configurable architecture with more than one hidden layer.
+- **Configurable hidden layers:** pass a width list such as
+  `--hidden-sizes 256,128`; forward propagation, backpropagation, Adam/SGD,
+  and checkpoint loading/saving support the chosen layer count.
 
-A general multi-hidden-layer architecture remains an optional enhancement
-rather than an unfinished core requirement.
+The listed bonus extensions are implemented.

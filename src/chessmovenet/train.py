@@ -119,6 +119,21 @@ def _check_seed(seed) -> int:
     return seed
 
 
+def _parse_hidden_sizes(value: str) -> tuple[int, ...]:
+    """Parse comma-separated positive hidden-layer widths for the CLI."""
+    try:
+        widths = tuple(int(part.strip()) for part in value.split(","))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "hidden sizes must be comma-separated integers, e.g. 256,128"
+        ) from exc
+    if not widths or any(width < 1 for width in widths):
+        raise argparse.ArgumentTypeError(
+            "hidden sizes must be positive integers, e.g. 256,128"
+        )
+    return widths
+
+
 
 def iterate_minibatches(
     X: np.ndarray, y: np.ndarray, batch_size: int = 128, seed: int = 0
@@ -199,14 +214,15 @@ def _validated_gradients(
         raise TypeError(
             f"expected grads to be a dict, got {type(grads).__name__}"
         )
-    if set(grads) != set(PARAMETER_NAMES):
+    parameter_names = net.parameter_names
+    if set(grads) != set(parameter_names):
         raise ValueError(
-            f"grads must have exactly the keys {PARAMETER_NAMES}, "
+            f"grads must have exactly the keys {parameter_names}, "
             f"got {tuple(sorted(grads))}"
         )
 
     checked: dict[str, np.ndarray] = {}
-    for name in PARAMETER_NAMES:
+    for name in parameter_names:
         gradient = np.asarray(grads[name])
         parameter = getattr(net, name)
         if gradient.shape != parameter.shape:
@@ -248,10 +264,10 @@ class AdamOptimizer:
         self.epsilon = _check_epsilon(epsilon)
         self.steps = 0
         self.m = {
-            name: np.zeros_like(getattr(net, name)) for name in PARAMETER_NAMES
+            name: np.zeros_like(getattr(net, name)) for name in net.parameter_names
         }
         self.v = {
-            name: np.zeros_like(getattr(net, name)) for name in PARAMETER_NAMES
+            name: np.zeros_like(getattr(net, name)) for name in net.parameter_names
         }
 
     def step(self, net: ChessMoveNet, grads: dict[str, np.ndarray]) -> None:
@@ -261,7 +277,7 @@ class AdamOptimizer:
         bias1 = 1.0 - self.beta1**self.steps
         bias2 = 1.0 - self.beta2**self.steps
 
-        for name in PARAMETER_NAMES:
+        for name in net.parameter_names:
             gradient = grads[name]
             self.m[name] *= self.beta1
             self.m[name] += (1.0 - self.beta1) * gradient
@@ -318,7 +334,7 @@ def update_parameters(
     lr = _check_learning_rate(lr)
 
     grads = _validated_gradients(net, grads)
-    for name in PARAMETER_NAMES:
+    for name in net.parameter_names:
         gradient = grads[name]
         parameter = getattr(net, name)
         # The update itself: parameter = parameter - lr * gradient.
@@ -703,6 +719,10 @@ def main() -> None:
         help="hidden-layer activation (default: %(default)s)",
     )
     parser.add_argument(
+        "--hidden-sizes", type=_parse_hidden_sizes, default=(256,),
+        help="comma-separated hidden layer widths (default: 256)",
+    )
+    parser.add_argument(
         "--adam-beta1", type=float, default=0.9,
         help="Adam first-moment decay (default: %(default)s)",
     )
@@ -762,11 +782,15 @@ def main() -> None:
         flush=True,
     )
 
-    net = ChessMoveNet(seed=args.seed, activation=args.activation)
+    net = ChessMoveNet(
+        seed=args.seed,
+        activation=args.activation,
+        hidden_sizes=args.hidden_sizes,
+    )
     print(
         f"training: epochs={args.epochs} batch_size={args.batch_size} "
         f"lr={args.lr} optimizer={args.optimizer} activation={args.activation} "
-        f"seed={args.seed}",
+        f"hidden_sizes={args.hidden_sizes} seed={args.seed}",
         flush=True,
     )
     history = train(

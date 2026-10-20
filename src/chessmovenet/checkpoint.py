@@ -29,6 +29,7 @@ exact flag needed to proceed.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -77,13 +78,13 @@ def _check_writable(path: Path, overwrite: bool) -> None:
 def save_checkpoint(
     path, net: ChessMoveNet, *, overwrite: bool = False
 ) -> None:
-    """Save the network's four parameters to ``path`` (a ``.npz`` file).
+    """Save all network parameters and architecture metadata to ``path``.
 
     Args:
         path: Destination file; must end in ``.npz``.  Missing parent
             directories (e.g. ``artifacts/``) are created.
-        net: The network whose ``W1, b1, W2, b2`` are stored.  Written
-            as float32, exactly the dtype the model trains in.
+        net: The network whose numbered weights and biases are stored as
+            float32, along with its activation name.
         overwrite: When False (the default) an existing file raises
             ``FileExistsError`` instead of being replaced.
 
@@ -96,7 +97,7 @@ def save_checkpoint(
 
     arrays = {
         name: np.asarray(getattr(net, name), dtype=np.float32)
-        for name in PARAMETER_NAMES
+        for name in net.parameter_names
     }
     # A Unicode scalar is safe with allow_pickle=False and lets a loaded model
     # retain whether its hidden layer uses ReLU, sigmoid, or tanh.  Older
@@ -136,14 +137,31 @@ def load_checkpoint(path) -> ChessMoveNet:
     # file that *needs* pickle to load is a file this module never
     # produced, and loading it would be a code-execution risk.
     with np.load(path, allow_pickle=False) as stored:
-        missing = [k for k in PARAMETER_NAMES if k not in stored.files]
+        weight_layers = sorted(
+            int(match.group(1))
+            for key in stored.files
+            if (match := re.fullmatch(r"W([1-9][0-9]*)", key))
+        )
+        if not weight_layers or weight_layers != list(
+            range(1, len(weight_layers) + 1)
+        ) or len(weight_layers) < 2:
+            raise ValueError(
+                f"checkpoint {path} must contain consecutive W1..WL arrays "
+                "for at least one hidden layer and one output layer"
+            )
+        parameter_names = tuple(
+            name
+            for layer in weight_layers
+            for name in (f"W{layer}", f"b{layer}")
+        )
+        missing = [key for key in parameter_names if key not in stored.files]
         if missing:
             raise ValueError(
                 f"checkpoint {path} is missing parameter array(s): {missing}"
             )
         arrays = {
             name: np.asarray(stored[name], dtype=np.float32)
-            for name in PARAMETER_NAMES
+            for name in parameter_names
         }
         activation = (
             str(np.asarray(stored["activation"]).item())
@@ -151,40 +169,33 @@ def load_checkpoint(path) -> ChessMoveNet:
             else "relu"
         )
 
-    W1, b1, W2, b2 = (arrays[k] for k in PARAMETER_NAMES)
+    weights = [arrays[f"W{layer}"] for layer in weight_layers]
+    biases = [arrays[f"b{layer}"] for layer in weight_layers]
+    for index, (weight, bias) in enumerate(zip(weights, biases), start=1):
+        if weight.ndim != 2:
+            raise ValueError(f"W{index} must be 2-D, got {weight.ndim}-D")
+        if bias.shape != (weight.shape[1],):
+            raise ValueError(
+                f"b{index} has shape {bias.shape}, but W{index} implies "
+                f"width {weight.shape[1]}"
+            )
+        if index > 1 and weights[index - 2].shape[1] != weight.shape[0]:
+            raise ValueError(
+                f"W{index} expects {weight.shape[0]} inputs, but the "
+                f"previous layer produces {weights[index - 2].shape[1]}"
+            )
 
-    # --- Cross-consistency checks: the shapes must chain -------------
-    if W1.ndim != 2 or W2.ndim != 2:
-        raise ValueError(
-            f"W1 and W2 must be 2-D weight matrices, got "
-            f"{W1.ndim}-D and {W2.ndim}-D"
-        )
-    if b1.shape != (W1.shape[1],):
-        raise ValueError(
-            f"b1 has shape {b1.shape}, but W1 implies a hidden layer "
-            f"of width {W1.shape[1]}"
-        )
-    if W2.shape[0] != W1.shape[1]:
-        raise ValueError(
-            f"W2 expects {W2.shape[0]} hidden inputs, but W1 produces "
-            f"{W1.shape[1]}"
-        )
-    if b2.shape != (W2.shape[1],):
-        raise ValueError(
-            f"b2 has shape {b2.shape}, but W2 implies an output layer "
-            f"of width {W2.shape[1]}"
-        )
-
-    # Constructor validates that every size is a positive integer; a
-    # zero-width layer in a hand-crafted file is rejected right there.
+    hidden_sizes = tuple(weight.shape[1] for weight in weights[:-1])
     net = ChessMoveNet(
-        input_size=W1.shape[0],
-        hidden_size=W1.shape[1],
-        output_size=W2.shape[1],
-        seed=0,  # overwritten immediately; only shapes matter here
+        input_size=weights[0].shape[0],
+        hidden_size=hidden_sizes[0],
+        hidden_sizes=hidden_sizes,
+        output_size=weights[-1].shape[1],
+        seed=0,
         activation=activation,
     )
-    net.W1, net.b1, net.W2, net.b2 = W1, b1, W2, b2
+    for name, array in arrays.items():
+        setattr(net, name, array)
     return net
 
 

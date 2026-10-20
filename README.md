@@ -42,7 +42,7 @@ explainable. Course project.
 | Final held-out test-set evaluation | `scripts/evaluate_checkpoint.py` | done |
 | Bonus: Adam optimizer | `train.py` | done |
 | Bonus: Sigmoid and Tanh activations | `model.py`, `train.py` | done |
-| Bonus: configurable layer experiments | — | optional / remaining |
+| Bonus: configurable hidden layer sizes/depth | `model.py`, `train.py` | done |
 
 The numerical gradient check (analytical vs. finite-difference gradients on a
 tiny network) passes, so the forward/backward math is verified correct before
@@ -90,7 +90,7 @@ dataset — beating that baseline meaningfully is the first real milestone.
 ```
 src/chessmovenet/   package: data, dataset, split, encode, moves, model,
                     loss, train, checkpoint
-tests/              pytest suite (194 tests)
+tests/              pytest suite
 artifacts/          checkpoint.npz + history.npz after training
                     (generated, never committed)
 data/raw/           my Chess.com PGN (read-only, never committed)
@@ -138,6 +138,13 @@ PYTHONPATH=src python -m chessmovenet.train \
   --epochs 6 --batch-size 128 --lr 0.001 --optimizer adam --activation tanh --seed 0 \
   --checkpoint artifacts/checkpoint_adam_tanh_ep6.npz \
   --history artifacts/history_adam_tanh_ep6.npz
+
+# Bonus: use two hidden layers, with 256 then 128 neurons.
+PYTHONPATH=src python -m chessmovenet.train \
+  --epochs 6 --batch-size 128 --lr 0.001 --optimizer adam \
+  --hidden-sizes 256,128 --seed 0 \
+  --checkpoint artifacts/checkpoint_adam_256_128_ep6.npz \
+  --history artifacts/history_adam_256_128_ep6.npz
 
 # Expected output format (numbers illustrative -- nothing is pre-
 # claimed about them; epoch time now includes accuracy measurement,
