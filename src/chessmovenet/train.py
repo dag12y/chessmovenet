@@ -81,6 +81,32 @@ def _check_learning_rate(lr) -> float:
     return lr
 
 
+def _check_unit_interval(value, name: str) -> float:
+    """Validate an Adam decay coefficient in the half-open interval [0, 1)."""
+    if isinstance(value, bool) or not isinstance(
+        value, (int, float, np.integer, np.floating)
+    ):
+        raise TypeError(f"expected {name} to be a number, got {type(value).__name__}")
+    value = float(value)
+    if not np.isfinite(value) or not 0.0 <= value < 1.0:
+        raise ValueError(f"{name} must be finite and in [0, 1), got {value}")
+    return value
+
+
+def _check_epsilon(value) -> float:
+    """Validate Adam's positive denominator stabilizer."""
+    if isinstance(value, bool) or not isinstance(
+        value, (int, float, np.integer, np.floating)
+    ):
+        raise TypeError(
+            f"expected adam_epsilon to be a number, got {type(value).__name__}"
+        )
+    value = float(value)
+    if not np.isfinite(value) or value <= 0.0:
+        raise ValueError(f"adam_epsilon must be finite and positive, got {value}")
+    return value
+
+
 def _check_seed(seed) -> int:
     """Validate that ``seed`` is a non-negative integer; return as int."""
     if isinstance(seed, bool) or not isinstance(seed, (int, np.integer)):
@@ -165,6 +191,90 @@ def iterate_minibatches(
     return batches()
 
 
+def _validated_gradients(
+    net: ChessMoveNet, grads: dict[str, np.ndarray]
+) -> dict[str, np.ndarray]:
+    """Validate gradients and return them in the model parameter order."""
+    if not isinstance(grads, dict):
+        raise TypeError(
+            f"expected grads to be a dict, got {type(grads).__name__}"
+        )
+    if set(grads) != set(PARAMETER_NAMES):
+        raise ValueError(
+            f"grads must have exactly the keys {PARAMETER_NAMES}, "
+            f"got {tuple(sorted(grads))}"
+        )
+
+    checked: dict[str, np.ndarray] = {}
+    for name in PARAMETER_NAMES:
+        gradient = np.asarray(grads[name])
+        parameter = getattr(net, name)
+        if gradient.shape != parameter.shape:
+            raise ValueError(
+                f"gradient {name} has shape {gradient.shape}, but the "
+                f"parameter has shape {parameter.shape}"
+            )
+        if not np.issubdtype(gradient.dtype, np.number):
+            raise TypeError(
+                f"gradient {name} must contain numbers, got dtype "
+                f"{gradient.dtype}"
+            )
+        if not np.isfinite(gradient).all():
+            raise ValueError(f"gradient {name} must be finite")
+        checked[name] = gradient.astype(parameter.dtype, copy=False)
+    return checked
+
+
+class AdamOptimizer:
+    """Adam optimizer with per-parameter first and second moments.
+
+    Adam combines momentum (an exponentially weighted mean of gradients) with
+    an adaptive step size (an exponentially weighted mean of squared
+    gradients).  The bias corrections make the early steps unbiased even
+    though both moment estimates begin at zero.
+    """
+
+    def __init__(
+        self,
+        net: ChessMoveNet,
+        lr: float = 0.001,
+        beta1: float = 0.9,
+        beta2: float = 0.999,
+        epsilon: float = 1e-8,
+    ) -> None:
+        self.lr = _check_learning_rate(lr)
+        self.beta1 = _check_unit_interval(beta1, "adam_beta1")
+        self.beta2 = _check_unit_interval(beta2, "adam_beta2")
+        self.epsilon = _check_epsilon(epsilon)
+        self.steps = 0
+        self.m = {
+            name: np.zeros_like(getattr(net, name)) for name in PARAMETER_NAMES
+        }
+        self.v = {
+            name: np.zeros_like(getattr(net, name)) for name in PARAMETER_NAMES
+        }
+
+    def step(self, net: ChessMoveNet, grads: dict[str, np.ndarray]) -> None:
+        """Update ``net`` once using Adam's bias-corrected moments."""
+        grads = _validated_gradients(net, grads)
+        self.steps += 1
+        bias1 = 1.0 - self.beta1**self.steps
+        bias2 = 1.0 - self.beta2**self.steps
+
+        for name in PARAMETER_NAMES:
+            gradient = grads[name]
+            self.m[name] *= self.beta1
+            self.m[name] += (1.0 - self.beta1) * gradient
+            self.v[name] *= self.beta2
+            self.v[name] += (1.0 - self.beta2) * np.square(gradient)
+
+            m_hat = self.m[name] / bias1
+            v_hat = self.v[name] / bias2
+            getattr(net, name)[:] -= self.lr * m_hat / (
+                np.sqrt(v_hat) + self.epsilon
+            )
+
+
 def update_parameters(
     net: ChessMoveNet, grads: dict[str, np.ndarray], lr
 ) -> None:
@@ -207,29 +317,10 @@ def update_parameters(
     """
     lr = _check_learning_rate(lr)
 
-    if not isinstance(grads, dict):
-        raise TypeError(
-            f"expected grads to be a dict, got {type(grads).__name__}"
-        )
-    if set(grads) != set(PARAMETER_NAMES):
-        raise ValueError(
-            f"grads must have exactly the keys {PARAMETER_NAMES}, "
-            f"got {tuple(sorted(grads))}"
-        )
-
+    grads = _validated_gradients(net, grads)
     for name in PARAMETER_NAMES:
-        gradient = np.asarray(grads[name])
+        gradient = grads[name]
         parameter = getattr(net, name)
-        if gradient.shape != parameter.shape:
-            raise ValueError(
-                f"gradient {name} has shape {gradient.shape}, but the "
-                f"parameter has shape {parameter.shape}"
-            )
-        if not np.issubdtype(gradient.dtype, np.number):
-            raise TypeError(
-                f"gradient {name} must contain numbers, got dtype "
-                f"{gradient.dtype}"
-            )
         # The update itself: parameter = parameter - lr * gradient.
         # "-=" computes into the existing array (no new allocation)
         # and keeps float32, so memory stays flat epoch after epoch.
@@ -400,6 +491,10 @@ def train(
     batch_size: int = 128,
     lr: float = 0.001,
     seed: int = 0,
+    optimizer: str = "sgd",
+    adam_beta1: float = 0.9,
+    adam_beta2: float = 0.999,
+    adam_epsilon: float = 1e-8,
     verbose: bool = True,
 ) -> dict[str, list]:
     """Train ``net`` with mini-batch gradient descent; return history.
@@ -409,7 +504,7 @@ def train(
     1. shuffle the training rows (seed ``seed + epoch``, so every epoch
        shuffles differently but the *whole run* is reproducible from
        one seed), split into mini-batches;
-    2. for each batch: forward -> loss -> backward -> update (``lr``);
+    2. for each batch: forward -> loss -> backward -> optimizer update;
     3. record the average training loss over all batches (weighted by
        batch size), then -- forward only, **no weight updates** --
        measure validation loss with :func:`evaluate_loss` and raw
@@ -434,6 +529,10 @@ def train(
         batch_size: Examples per gradient update (>= 1).
         lr: Learning rate, finite and > 0.
         seed: Base seed for the shuffle RNG (>= 0).
+        optimizer: ``"sgd"`` for plain gradient descent (the default), or
+            ``"adam"`` for Adam's adaptive, momentum-based update.
+        adam_beta1, adam_beta2, adam_epsilon: Adam hyperparameters. They are
+            used only when ``optimizer="adam"``.
         verbose: When True, print one line per epoch.
 
     Returns:
@@ -456,6 +555,18 @@ def train(
     batch_size = _check_positive_int(batch_size, "batch_size")
     lr = _check_learning_rate(lr)
     seed = _check_seed(seed)
+    if not isinstance(optimizer, str):
+        raise TypeError(
+            f"optimizer must be a string, got {type(optimizer).__name__}"
+        )
+    optimizer = optimizer.lower()
+    if optimizer not in {"sgd", "adam"}:
+        raise ValueError(f"optimizer must be 'sgd' or 'adam', got {optimizer!r}")
+    adam = (
+        AdamOptimizer(net, lr, adam_beta1, adam_beta2, adam_epsilon)
+        if optimizer == "adam"
+        else None
+    )
 
     for tag, X, y in (
         ("X_train", X_train, y_train),
@@ -500,7 +611,10 @@ def train(
             logits = net.forward(X_batch)  # (b, 4272)
             loss = cross_entropy_loss(logits, y_batch)  # Python float
             grads = net.backward(X_batch, y_batch)  # W1,b1,W2,b2 grads
-            update_parameters(net, grads, lr)  # W -= lr * dW
+            if adam is None:
+                update_parameters(net, grads, lr)  # W -= lr * dW
+            else:
+                adam.step(net, grads)
 
             total_loss += loss * X_batch.shape[0]
             total_rows += X_batch.shape[0]
@@ -581,6 +695,22 @@ def main() -> None:
         help="base seed for weight init and shuffling (default: %(default)s)",
     )
     parser.add_argument(
+        "--optimizer", choices=("sgd", "adam"), default="sgd",
+        help="weight-update rule (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--adam-beta1", type=float, default=0.9,
+        help="Adam first-moment decay (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--adam-beta2", type=float, default=0.999,
+        help="Adam second-moment decay (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--adam-epsilon", type=float, default=1e-8,
+        help="Adam numerical stabilizer (default: %(default)s)",
+    )
+    parser.add_argument(
         "--checkpoint", default="artifacts/checkpoint.npz",
         help="where to save trained weights (default: %(default)s)",
     )
@@ -631,7 +761,7 @@ def main() -> None:
     net = ChessMoveNet(seed=args.seed)
     print(
         f"training: epochs={args.epochs} batch_size={args.batch_size} "
-        f"lr={args.lr} seed={args.seed}",
+        f"lr={args.lr} optimizer={args.optimizer} seed={args.seed}",
         flush=True,
     )
     history = train(
@@ -641,6 +771,10 @@ def main() -> None:
         batch_size=args.batch_size,
         lr=args.lr,
         seed=args.seed,
+        optimizer=args.optimizer,
+        adam_beta1=args.adam_beta1,
+        adam_beta2=args.adam_beta2,
+        adam_epsilon=args.adam_epsilon,
     )
 
     total = sum(history["seconds"])

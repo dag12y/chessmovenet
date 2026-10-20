@@ -18,6 +18,7 @@ import pytest
 from chessmovenet.checkpoint import load_checkpoint, load_history
 from chessmovenet.model import ChessMoveNet
 from chessmovenet.train import (
+    AdamOptimizer,
     evaluate_accuracy,
     evaluate_loss,
     iterate_minibatches,
@@ -231,6 +232,38 @@ def test_update_rejects_invalid_grads_and_learning_rates() -> None:
         update_parameters(net, good, "0.1")
     with pytest.raises(TypeError, match="number"):
         update_parameters(net, good, True)
+
+
+def test_adam_first_step_uses_bias_corrected_gradient_direction() -> None:
+    """On step one, Adam's corrected moments move each nonzero entry
+    approximately one learning-rate unit in its gradient's direction."""
+    net, X, y = _tiny_net()
+    grads = net.backward(X, y)
+    before = net.W1.copy()
+    adam = AdamOptimizer(net, lr=0.01)
+
+    adam.step(net, grads)
+
+    expected = before - 0.01 * grads["W1"] / (
+        np.abs(grads["W1"]) + 1e-8
+    )
+    np.testing.assert_allclose(net.W1, expected, rtol=1e-5, atol=1e-7)
+    assert adam.steps == 1
+
+
+def test_adam_reduces_loss_on_synthetic_data() -> None:
+    """Adam must work end-to-end with the same batched training API."""
+    X_tr, y_tr, X_v, y_v = _learnable_data()
+    net = ChessMoveNet(input_size=6, hidden_size=8, output_size=4, seed=0)
+    before = evaluate_loss(net, X_v, y_v, batch_size=32)
+
+    history = train(
+        net, X_tr, y_tr, X_v, y_v,
+        epochs=8, batch_size=32, lr=0.01, seed=0,
+        optimizer="adam", verbose=False,
+    )
+
+    assert history["val_loss"][-1] < before
 
 
 # ---------------------------------------------------------------------------

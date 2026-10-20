@@ -57,10 +57,12 @@ PYTHONPATH=src python scripts/evaluate_checkpoint.py \
   --checkpoint artifacts/checkpoint_ep15.npz
 ```
 
-## Optional bonus extensions not implemented
+## Bonus extensions
 
+- **Adam optimizer:** implemented in `train.py`; select it with
+  `--optimizer adam`.
 - Sigmoid and Tanh activations.
-- Momentum and Adam optimizers.
 - A configurable architecture with more than one hidden layer.
 
-These are enhancements rather than unfinished core requirements.
+Sigmoid, Tanh, and a general multi-hidden-layer architecture remain optional
+enhancements rather than unfinished core requirements.

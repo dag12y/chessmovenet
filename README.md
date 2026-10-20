@@ -40,7 +40,8 @@ explainable. Course project.
 | Accuracy tracking (top-1 / top-5, raw classes) | `train.py` `evaluate_accuracy` | done |
 | Required 3-layer, one-neuron gradient-descent demonstration | `scripts/three_layer_gradient_descent.py` | done |
 | Final held-out test-set evaluation | `scripts/evaluate_checkpoint.py` | done |
-| Bonus: sigmoid/tanh, momentum/Adam, layer experiments | — | optional / remaining |
+| Bonus: Adam optimizer | `train.py` | done |
+| Bonus: sigmoid/tanh, configurable layer experiments | — | optional / remaining |
 
 The numerical gradient check (analytical vs. finite-difference gradients on a
 tiny network) passes, so the forward/backward math is verified correct before
@@ -123,6 +124,12 @@ PYTHONPATH=src python -m chessmovenet.train \
   --epochs 15 --batch-size 128 --lr 0.001 --seed 0 \
   --checkpoint artifacts/checkpoint_ep15.npz \
   --history artifacts/history_ep15.npz
+
+# Bonus: train with Adam. Use new output paths so baseline results are kept.
+PYTHONPATH=src python -m chessmovenet.train \
+  --epochs 15 --batch-size 128 --lr 0.001 --optimizer adam --seed 0 \
+  --checkpoint artifacts/checkpoint_adam_ep15.npz \
+  --history artifacts/history_adam_ep15.npz
 
 # Expected output format (numbers illustrative -- nothing is pre-
 # claimed about them; epoch time now includes accuracy measurement,
