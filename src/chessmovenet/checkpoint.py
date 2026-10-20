@@ -98,6 +98,10 @@ def save_checkpoint(
         name: np.asarray(getattr(net, name), dtype=np.float32)
         for name in PARAMETER_NAMES
     }
+    # A Unicode scalar is safe with allow_pickle=False and lets a loaded model
+    # retain whether its hidden layer uses ReLU, sigmoid, or tanh.  Older
+    # checkpoints have no such field and are treated as ReLU below.
+    arrays["activation"] = np.asarray(net.activation)
     # np.savez writes numeric arrays with pickle disabled on read;
     # no object arrays ever enter the file.
     np.savez(path, **arrays)
@@ -141,6 +145,11 @@ def load_checkpoint(path) -> ChessMoveNet:
             name: np.asarray(stored[name], dtype=np.float32)
             for name in PARAMETER_NAMES
         }
+        activation = (
+            str(np.asarray(stored["activation"]).item())
+            if "activation" in stored.files
+            else "relu"
+        )
 
     W1, b1, W2, b2 = (arrays[k] for k in PARAMETER_NAMES)
 
@@ -173,6 +182,7 @@ def load_checkpoint(path) -> ChessMoveNet:
         hidden_size=W1.shape[1],
         output_size=W2.shape[1],
         seed=0,  # overwritten immediately; only shapes matter here
+        activation=activation,
     )
     net.W1, net.b1, net.W2, net.b2 = W1, b1, W2, b2
     return net

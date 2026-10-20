@@ -103,6 +103,28 @@ def relu(z: np.ndarray) -> np.ndarray:
     return np.maximum(z, 0)
 
 
+def sigmoid(z: np.ndarray) -> np.ndarray:
+    """Numerically stable logistic sigmoid, applied element-wise.
+
+    ``sigmoid(z) = 1 / (1 + exp(-z))`` maps every finite real number to
+    ``(0, 1)``.  Splitting positive and negative inputs avoids overflow for
+    very negative values, where the direct formula would calculate ``exp`` of
+    a large positive number.
+    """
+    z = np.asarray(z)
+    result = np.empty_like(z, dtype=np.result_type(z, np.float32))
+    positive = z >= 0
+    result[positive] = 1.0 / (1.0 + np.exp(-z[positive]))
+    exp_z = np.exp(z[~positive])
+    result[~positive] = exp_z / (1.0 + exp_z)
+    return result
+
+
+def tanh(z: np.ndarray) -> np.ndarray:
+    """Hyperbolic tangent, applied element-wise, with range ``[-1, 1]``."""
+    return np.tanh(z)
+
+
 def softmax(logits: np.ndarray) -> np.ndarray:
     """Numerically stable softmax along the last axis.
 
@@ -161,6 +183,7 @@ class ChessMoveNet:
         hidden_size: int = HIDDEN_SIZE,
         output_size: int = OUTPUT_SIZE,
         seed: int | None = None,
+        activation: str = "relu",
     ) -> None:
         """Create the network and initialize its parameters.
 
@@ -171,6 +194,8 @@ class ChessMoveNet:
             seed: Optional integer seed for reproducible weights.  The
                 same seed always produces the same initial weights;
                 ``None`` gives fresh random weights each time.
+            activation: Hidden-layer activation: ``"relu"`` (default),
+                ``"sigmoid"``, or ``"tanh"``.
 
         Raises:
             TypeError: If a size is not an integer.
@@ -193,6 +218,16 @@ class ChessMoveNet:
         self.input_size = int(input_size)
         self.hidden_size = int(hidden_size)
         self.output_size = int(output_size)
+        if not isinstance(activation, str):
+            raise TypeError(
+                f"activation must be a string, got {type(activation).__name__}"
+            )
+        self.activation = activation.lower()
+        if self.activation not in {"relu", "sigmoid", "tanh"}:
+            raise ValueError(
+                "activation must be 'relu', 'sigmoid', or 'tanh', "
+                f"got {activation!r}"
+            )
 
         # --- Reproducible random initialization -------------------------
         # default_rng(seed) is a local, isolated random stream: the same
@@ -205,9 +240,12 @@ class ChessMoveNet:
         # typical size of activations stable from layer to layer (see
         # the module docstring).  astype(np.float32) matches the dtype
         # of encode_board's output, keeping all arithmetic in float32.
+        hidden_scale = np.sqrt(
+            (2.0 if self.activation == "relu" else 1.0) / self.input_size
+        )
         self.W1 = rng.normal(
             0.0,
-            np.sqrt(2.0 / self.input_size),
+            hidden_scale,
             size=(self.input_size, self.hidden_size),
         ).astype(np.float32)  # (781, 256)
 
@@ -347,10 +385,28 @@ class ChessMoveNet:
         # (256,) / (4272,) bias vectors are automatically added to
         # every one of the N rows via broadcasting.
         Z1 = X @ self.W1 + self.b1  # (N,781)@(781,256)+(256,) = (N,256)
-        A1 = relu(Z1)  # (N, 256)
+        A1 = self._activate(Z1)  # (N, 256)
         # (N,256)@(256,4272)+(4272,) = (N, 4272)
         logits = A1 @ self.W2 + self.b2
         return X, Z1, A1, logits, single
+
+    def _activate(self, z: np.ndarray) -> np.ndarray:
+        """Apply this network's configured hidden-layer activation."""
+        if self.activation == "relu":
+            return relu(z)
+        if self.activation == "sigmoid":
+            return sigmoid(z)
+        return tanh(z)
+
+    def _activation_derivative(
+        self, z: np.ndarray, activated: np.ndarray
+    ) -> np.ndarray:
+        """Derivative of the configured activation, evaluated at ``z``."""
+        if self.activation == "relu":
+            return (z > 0).astype(activated.dtype)
+        if self.activation == "sigmoid":
+            return activated * (1.0 - activated)
+        return 1.0 - np.square(activated)
 
     def _check_labels(self, labels: np.ndarray, n: int) -> np.ndarray:
         """Validate class labels against a batch of size ``n``.
@@ -474,7 +530,7 @@ class ChessMoveNet:
         # --- Step 4: back through the ReLU -------------------------------
         # The ReLU derivative is 1 where Z1 > 0 and 0 elsewhere: a unit
         # that stayed switched off cannot pass any gradient upstream.
-        dZ1 = dA1 * (Z1 > 0)  # (N, 256)
+        dZ1 = dA1 * self._activation_derivative(Z1, A1)  # (N, 256)
 
         # --- Step 5: hidden-layer gradients ------------------------------
         dW1 = X2d.T @ dZ1  # (781,N) @ (N,256) = (781, 256)

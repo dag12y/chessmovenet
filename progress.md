@@ -61,8 +61,9 @@ PYTHONPATH=src python scripts/evaluate_checkpoint.py \
 
 - **Adam optimizer:** implemented in `train.py`; select it with
   `--optimizer adam`.
-- Sigmoid and Tanh activations.
+- **Sigmoid and Tanh:** implemented in `model.py`, including their
+  backpropagation derivatives; choose an activation with `--activation`.
 - A configurable architecture with more than one hidden layer.
 
-Sigmoid, Tanh, and a general multi-hidden-layer architecture remain optional
-enhancements rather than unfinished core requirements.
+A general multi-hidden-layer architecture remains an optional enhancement
+rather than an unfinished core requirement.

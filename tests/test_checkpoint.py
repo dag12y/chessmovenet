@@ -58,16 +58,26 @@ def test_checkpoint_round_trip_restores_identical_parameters(
 def test_checkpoint_file_is_plain_numeric_npz_without_pickle(
     tmp_path,
 ) -> None:
-    """The file contains exactly the four parameter arrays, readable
+    """The file contains parameters plus activation metadata, readable
     with allow_pickle=False (i.e. no pickle anywhere)."""
     path = tmp_path / "model.npz"
     save_checkpoint(path, _fresh_net(seed=1))
 
     with np.load(path, allow_pickle=False) as stored:
-        assert set(stored.files) == set(PARAMETER_NAMES)
+        assert set(stored.files) == {*PARAMETER_NAMES, "activation"}
         for name in PARAMETER_NAMES:
             assert stored[name].dtype == np.float32
             assert np.isfinite(stored[name]).all()
+
+
+def test_checkpoint_round_trip_preserves_hidden_activation(tmp_path) -> None:
+    original = ChessMoveNet(6, 5, 4, seed=0, activation="tanh")
+    path = tmp_path / "tanh_model.npz"
+
+    save_checkpoint(path, original)
+    loaded = load_checkpoint(path)
+
+    assert loaded.activation == "tanh"
 
 
 def test_save_checkpoint_creates_missing_parent_directories(tmp_path) -> None:

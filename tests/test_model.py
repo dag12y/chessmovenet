@@ -20,7 +20,9 @@ from chessmovenet.model import (
     INPUT_SIZE,
     ChessMoveNet,
     relu,
+    sigmoid,
     softmax,
+    tanh,
 )
 from chessmovenet.moves import OUTPUT_SIZE
 
@@ -133,6 +135,45 @@ def test_relu_preserves_shape_on_batches() -> None:
     assert result.shape == z.shape
     assert (result[z < 0] == 0.0).all()
     np.testing.assert_array_equal(result[z > 0], z[z > 0])
+
+
+def test_sigmoid_is_stable_and_has_expected_values() -> None:
+    values = np.array([-1e4, -1.0, 0.0, 1.0, 1e4], dtype=np.float32)
+
+    result = sigmoid(values)
+
+    assert np.isfinite(result).all()
+    np.testing.assert_allclose(result, [0.0, 0.2689414, 0.5, 0.7310586, 1.0])
+
+
+def test_tanh_is_bounded_odd_and_zero_at_zero() -> None:
+    values = np.array([-1e4, -1.0, 0.0, 1.0, 1e4], dtype=np.float32)
+
+    result = tanh(values)
+
+    assert np.isfinite(result).all()
+    assert (result >= -1.0).all() and (result <= 1.0).all()
+    assert result[2] == 0.0
+    np.testing.assert_allclose(result[0], -result[-1])
+    np.testing.assert_allclose(result[1], -result[3])
+
+
+def test_hidden_activation_is_configurable_and_backpropagates() -> None:
+    X = RNG.normal(size=(3, 4)).astype(np.float32)
+    y = np.array([0, 1, 2], dtype=np.int64)
+    for activation in ("relu", "sigmoid", "tanh"):
+        net = ChessMoveNet(4, 5, 3, seed=0, activation=activation)
+        logits = net.forward(X)
+        gradients = net.backward(X, y)
+        assert logits.shape == (3, 3)
+        assert all(np.isfinite(gradient).all() for gradient in gradients.values())
+
+
+def test_invalid_hidden_activation_is_rejected() -> None:
+    with pytest.raises(ValueError, match="activation"):
+        ChessMoveNet(activation="gelu")
+    with pytest.raises(TypeError, match="activation"):
+        ChessMoveNet(activation=3)
 
 
 # ---------------------------------------------------------------------------

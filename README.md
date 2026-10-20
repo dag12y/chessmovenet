@@ -41,7 +41,8 @@ explainable. Course project.
 | Required 3-layer, one-neuron gradient-descent demonstration | `scripts/three_layer_gradient_descent.py` | done |
 | Final held-out test-set evaluation | `scripts/evaluate_checkpoint.py` | done |
 | Bonus: Adam optimizer | `train.py` | done |
-| Bonus: sigmoid/tanh, configurable layer experiments | — | optional / remaining |
+| Bonus: Sigmoid and Tanh activations | `model.py`, `train.py` | done |
+| Bonus: configurable layer experiments | — | optional / remaining |
 
 The numerical gradient check (analytical vs. finite-difference gradients on a
 tiny network) passes, so the forward/backward math is verified correct before
@@ -130,6 +131,13 @@ PYTHONPATH=src python -m chessmovenet.train \
   --epochs 15 --batch-size 128 --lr 0.001 --optimizer adam --seed 0 \
   --checkpoint artifacts/checkpoint_adam_ep15.npz \
   --history artifacts/history_adam_ep15.npz
+
+# Bonus: compare another hidden-layer activation on validation data.
+# Use new output paths and choose models by validation metrics only.
+PYTHONPATH=src python -m chessmovenet.train \
+  --epochs 6 --batch-size 128 --lr 0.001 --optimizer adam --activation tanh --seed 0 \
+  --checkpoint artifacts/checkpoint_adam_tanh_ep6.npz \
+  --history artifacts/history_adam_tanh_ep6.npz
 
 # Expected output format (numbers illustrative -- nothing is pre-
 # claimed about them; epoch time now includes accuracy measurement,

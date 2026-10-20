@@ -535,7 +535,7 @@ def test_main_overwrite_flag_replaces_existing_outputs(
 
     assert "saved checkpoint ->" in out
     with np.load(ckpt, allow_pickle=False) as stored:
-        assert set(stored.files) == {"W1", "b1", "W2", "b2"}
+            assert set(stored.files) == {"W1", "b1", "W2", "b2", "activation"}
     with np.load(hist, allow_pickle=False) as stored:
         assert set(stored.files) == {
             "epoch", "train_loss", "val_loss", "seconds",

@@ -699,6 +699,10 @@ def main() -> None:
         help="weight-update rule (default: %(default)s)",
     )
     parser.add_argument(
+        "--activation", choices=("relu", "sigmoid", "tanh"), default="relu",
+        help="hidden-layer activation (default: %(default)s)",
+    )
+    parser.add_argument(
         "--adam-beta1", type=float, default=0.9,
         help="Adam first-moment decay (default: %(default)s)",
     )
@@ -758,10 +762,11 @@ def main() -> None:
         flush=True,
     )
 
-    net = ChessMoveNet(seed=args.seed)
+    net = ChessMoveNet(seed=args.seed, activation=args.activation)
     print(
         f"training: epochs={args.epochs} batch_size={args.batch_size} "
-        f"lr={args.lr} optimizer={args.optimizer} seed={args.seed}",
+        f"lr={args.lr} optimizer={args.optimizer} activation={args.activation} "
+        f"seed={args.seed}",
         flush=True,
     )
     history = train(
