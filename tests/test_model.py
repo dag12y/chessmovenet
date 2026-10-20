@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from chessmovenet.encode import BOARD_FEATURE_SIZE
+from chessmovenet.loss import cross_entropy_loss
 from chessmovenet.model import (
     HIDDEN_SIZE,
     INPUT_SIZE,
@@ -466,6 +467,34 @@ def test_forward_rejects_non_numeric_input() -> None:
         net.forward(["not", "numbers"])
 
 
+def test_forward_rejects_empty_batch() -> None:
+    """A (0, 781) batch has no positions to score — likely an
+    off-by-one slice in future training code, so fail loudly here."""
+    net = ChessMoveNet(seed=0)
+
+    with pytest.raises(ValueError, match="at least one position"):
+        net.forward(np.zeros((0, BOARD_FEATURE_SIZE), dtype=np.float32))
+
+
+def test_forward_rejects_non_finite_features() -> None:
+    """NaN or infinite board features would silently poison every
+    logit and gradient; the error must point at the input."""
+    net = ChessMoveNet(seed=0)
+    x_nan = SINGLE.copy()
+    x_nan[5] = np.nan
+    x_inf = SINGLE.copy()
+    x_inf[7] = np.inf
+
+    with pytest.raises(ValueError, match="finite"):
+        net.forward(x_nan)
+    with pytest.raises(ValueError, match="finite"):
+        net.forward(x_inf)
+    # backward goes through the same validation, so bad inputs cannot
+    # silently produce NaN gradients either.
+    with pytest.raises(ValueError, match="finite"):
+        net.backward(x_nan, 3)
+
+
 def test_predict_and_top_k_validate_their_inputs_too() -> None:
     """The convenience methods share forward's validation."""
     net = ChessMoveNet(seed=0)
@@ -477,4 +506,137 @@ def test_predict_and_top_k_validate_their_inputs_too() -> None:
         net.predict_top_k(bad, k=2)
 
 
+# ---------------------------------------------------------------------------
+# Backpropagation: gradients of the mean cross-entropy loss
+# ---------------------------------------------------------------------------
+
+
+def test_backward_gradients_match_parameter_shapes_and_are_finite() -> None:
+    """Every gradient array mirrors its parameter's shape, is finite,
+    and the dict keys are exactly the parameter names."""
+    net = ChessMoveNet(seed=0)
+    labels = np.array([10, 20, 30, 40])
+
+    grads = net.backward(BATCH, labels)
+
+    assert set(grads) == {"W1", "b1", "W2", "b2"}
+    for name in ("W1", "b1", "W2", "b2"):
+        assert grads[name].shape == getattr(net, name).shape
+        assert np.isfinite(grads[name]).all()
+
+
+def test_backward_works_for_a_single_example_with_scalar_label() -> None:
+    """One (781,) position and a bare integer label produce the same
+    gradient shapes as a full batch."""
+    net = ChessMoveNet(seed=0)
+
+    grads = net.backward(SINGLE, 7)
+
+    for name in ("W1", "b1", "W2", "b2"):
+        assert grads[name].shape == getattr(net, name).shape
+        assert np.isfinite(grads[name]).all()
+
+
+def test_backward_leaves_the_parameters_untouched() -> None:
+    """backward only *reports* gradients; it must not update weights."""
+    net = ChessMoveNet(seed=0)
+    before = {
+        name: getattr(net, name).copy() for name in ("W1", "b1", "W2", "b2")
+    }
+
+    net.backward(BATCH, np.array([0, 1, 2, 3]))
+
+    for name in ("W1", "b1", "W2", "b2"):
+        np.testing.assert_array_equal(getattr(net, name), before[name])
+
+
+def test_backward_gradients_are_averaged_over_the_batch() -> None:
+    """The gradient of the *mean* loss over a batch equals the mean of
+    the per-example gradients (each example's forward pass is
+    independent, so only the final /N couples them)."""
+    net = ChessMoveNet(input_size=6, hidden_size=5, output_size=4, seed=3)
+    X = np.random.default_rng(9).normal(size=(3, 6)).astype(np.float32)
+    labels = np.array([0, 1, 3])
+
+    batch_grads = net.backward(X, labels)
+    per_example = [net.backward(X[i], int(labels[i])) for i in range(3)]
+
+    for name in ("W1", "b1", "W2", "b2"):
+        mean_of_singles = np.mean([g[name] for g in per_example], axis=0)
+        np.testing.assert_allclose(
+            batch_grads[name], mean_of_singles, rtol=1e-4, atol=1e-6
+        )
+
+
+def test_backward_rejects_invalid_labels() -> None:
+    """Wrong counts, wrong shapes, float labels, and out-of-range
+    labels all fail with clear errors."""
+    net = ChessMoveNet(seed=0)
+
+    with pytest.raises(ValueError, match="4 label"):  # too few
+        net.backward(BATCH, [0, 1])
+    with pytest.raises(ValueError, match="4 label"):  # scalar vs batch
+        net.backward(BATCH, 0)
+    with pytest.raises(ValueError, match="shape"):  # 2-D label block
+        net.backward(BATCH, np.zeros((2, 2), dtype=np.int64))
+    with pytest.raises(TypeError, match="integers"):  # floats
+        net.backward(BATCH, [0.0, 1.0, 2.0, 3.0])
+    with pytest.raises(ValueError, match="0 \\.\\. 4271"):  # out of range
+        net.backward(BATCH, [0, 1, 2, OUTPUT_SIZE])
+
+
+def test_backward_rejects_invalid_inputs() -> None:
+    """The input validation of forward applies unchanged."""
+    net = ChessMoveNet(seed=0)
+
+    with pytest.raises(ValueError, match="781"):
+        net.backward(np.zeros(10, dtype=np.float32), 0)
+    with pytest.raises(ValueError, match="dimension"):
+        net.backward(np.zeros((2, 3, BOARD_FEATURE_SIZE)), [0, 1])
+
+
+def test_numerical_gradient_check_on_a_tiny_network() -> None:
+    """Compare every analytical gradient entry against a central
+    finite difference: ``(L(w+eps) - L(w-eps)) / (2 * eps)``.
+
+    The network is deliberately tiny (5 -> 4 -> 3, so only 39 parameter
+    entries) to keep the ~78 extra forward passes instant.  Parameters
+    are promoted to float64 — finite differences in float32 would drown
+    the comparison in rounding noise.
+    """
+    net = ChessMoveNet(input_size=5, hidden_size=4, output_size=3, seed=11)
+    net.W1 = net.W1.astype(np.float64)
+    net.b1 = net.b1.astype(np.float64)
+    net.W2 = net.W2.astype(np.float64)
+    net.b2 = net.b2.astype(np.float64)
+
+    X = np.random.default_rng(0).normal(size=(2, 5)).astype(np.float32)
+    labels = np.array([1, 2])
+
+    # Guard against ReLU kinks: the finite-difference formula assumes a
+    # smooth region, so every pre-activation must sit safely away from 0
+    # (otherwise a +/-eps step could flip a unit's on/off state).
+    Z1 = X @ net.W1 + net.b1
+    assert np.min(np.abs(Z1)) > 1e-3
+
+    analytic = net.backward(X, labels)
+
+    eps = 1e-5
+    for name in ("W1", "b1", "W2", "b2"):
+        parameter = getattr(net, name)
+        numeric = np.empty_like(parameter)
+        for index in np.ndindex(parameter.shape):
+            original = parameter[index]
+
+            parameter[index] = original + eps
+            loss_plus = cross_entropy_loss(net.forward(X), labels)
+            parameter[index] = original - eps
+            loss_minus = cross_entropy_loss(net.forward(X), labels)
+            parameter[index] = original  # restore before continuing
+
+            numeric[index] = (loss_plus - loss_minus) / (2.0 * eps)
+
+        np.testing.assert_allclose(
+            analytic[name], numeric, rtol=1e-4, atol=1e-7, err_msg=name
+        )
 

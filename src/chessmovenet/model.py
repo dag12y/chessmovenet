@@ -233,7 +233,8 @@ class ChessMoveNet:
         Raises:
             TypeError: If ``X`` cannot be converted to a numeric array.
             ValueError: If ``X`` has the wrong number of dimensions or
-                the wrong feature count in its last axis.
+                the wrong feature count in its last axis, contains no
+                rows, or contains NaN / infinite values.
         """
         try:
             X = np.asarray(X, dtype=np.float32)
@@ -254,6 +255,21 @@ class ChessMoveNet:
                 f"each position must have exactly {self.input_size} "
                 f"features, but the last axis of the input has "
                 f"{X.shape[-1]}"
+            )
+        if X.ndim == 2 and X.shape[0] == 0:
+            # An empty batch is almost always a slicing bug upstream
+            # (e.g. an off-by-one in a future training loop).  Failing
+            # here with a clear message beats the cryptic reduction
+            # error NumPy would raise inside softmax.
+            raise ValueError("X must contain at least one position")
+        n_bad = int(X.size - np.count_nonzero(np.isfinite(X)))
+        if n_bad:
+            # NaN/inf features would silently poison every logit and
+            # gradient downstream; name the problem while it is still
+            # closest to its cause (the input, not the weights).
+            raise ValueError(
+                f"X must be finite (no NaN or infinity), but "
+                f"{n_bad} feature value(s) are not"
             )
         return X
 
@@ -284,6 +300,36 @@ class ChessMoveNet:
             when ``apply_softmax=True``.  **No legality filtering is
             done**: every class gets a score, including moves that
             cannot be played in this position.
+
+        The arithmetic itself lives in :meth:`_forward_with_cache` so
+        that :meth:`backward` reuses exactly the same calculations.
+        """
+        _, _, _, logits, single = self._forward_with_cache(X)
+
+        output = softmax(logits) if apply_softmax else logits
+
+        # "One vector in -> one vector out": drop the batch axis.
+        return output[0] if single else output
+
+    def _forward_with_cache(
+        self, X: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, bool]:
+        """Run the forward pass, keeping every intermediate value.
+
+        This is the single place where the network's arithmetic lives;
+        :meth:`forward` and :meth:`backward` both call it, so the
+        forward calculation used for predictions is *exactly* the one
+        used to produce gradients.
+
+        Args:
+            X: Board features of shape ``(781,)`` or ``(N, 781)``.
+
+        Returns:
+            ``(X2d, Z1, A1, logits, single)``: the input as a 2-D
+            ``(N, 781)`` array, the hidden pre-activations ``(N, 256)``
+            and activations ``(N, 256)``, the logits ``(N, 4272)``,
+            and ``single`` — whether the caller passed one position
+            (so public methods know to drop the batch axis again).
         """
         X = self._check_input(X)
         single = X.ndim == 1
@@ -298,11 +344,137 @@ class ChessMoveNet:
         A1 = relu(Z1)  # (N, 256)
         # (N,256)@(256,4272)+(4272,) = (N, 4272)
         logits = A1 @ self.W2 + self.b2
+        return X, Z1, A1, logits, single
 
-        output = softmax(logits) if apply_softmax else logits
+    def _check_labels(self, labels: np.ndarray, n: int) -> np.ndarray:
+        """Validate class labels against a batch of size ``n``.
 
-        # "One vector in -> one vector out": drop the batch axis we added.
-        return output[0] if single else output
+        A bare Python/NumPy integer is accepted as shorthand for a
+        batch of one — mirroring how :meth:`forward` accepts a single
+        position.
+
+        Args:
+            labels: Candidate labels (scalar or 1-D).
+            n: Number of examples in the batch.
+
+        Returns:
+            A 1-D int64 array of shape ``(n,)``.
+
+        Raises:
+            TypeError: If the labels are not integers.
+            ValueError: If the shape does not match the batch or a
+                label falls outside ``0 .. output_size - 1``.
+        """
+        labels = np.asarray(labels)
+        if labels.ndim == 0:  # scalar label -> batch of one
+            labels = labels.reshape(1)
+
+        if labels.ndim != 1:
+            raise ValueError(
+                f"expected labels of shape ({n},), got shape {labels.shape}"
+            )
+        if labels.shape[0] != n:
+            raise ValueError(
+                f"expected {n} label(s) to match the input batch, "
+                f"got {labels.shape[0]}"
+            )
+        if not np.issubdtype(labels.dtype, np.integer):
+            raise TypeError(
+                f"labels must be integers, got dtype {labels.dtype}"
+            )
+
+        labels = labels.astype(np.int64)
+        if np.any(labels < 0) or np.any(labels >= self.output_size):
+            raise ValueError(
+                f"labels must be in 0 .. {self.output_size - 1}, "
+                f"got a value outside this range"
+            )
+        return labels
+
+    def backward(
+        self, X: np.ndarray, labels: np.ndarray
+    ) -> dict[str, np.ndarray]:
+        """Compute loss gradients for W1, b1, W2, and b2 (no updates).
+
+        What it computes
+        ----------------
+        The mean cross-entropy loss of this batch (see
+        :mod:`chessmovenet.loss`) has, with respect to the logits, the
+        classic softmax + cross-entropy gradient:
+
+        ``dL/dlogits = (softmax(logits) - one_hot(labels)) / N``
+
+        — "how much each predicted probability overshoots the truth",
+        averaged over the batch.  The chain rule then walks that signal
+        backward through each layer:
+
+        ========  ==========================  =====================
+        Step      Array (shape)              Formula
+        ========  ==========================  =====================
+        1         ``dlogits`` (N, 4272)      ``(P - Y) / N``
+        2         ``dW2`` (256, 4272)         ``A1.T @ dlogits``
+        2         ``db2`` (4272,)             ``dlogits.sum(axis=0)``
+        3         ``dA1`` (N, 256)            ``dlogits @ W2.T``
+        4         ``dZ1`` (N, 256)            ``dA1 * (Z1 > 0)``
+        5         ``dW1`` (781, 256)          ``X.T @ dZ1``
+        5         ``db1`` (256,)              ``dZ1.sum(axis=0)``
+        ========  ==========================  =====================
+
+        (``P`` = softmax probabilities, ``Y`` = one-hot labels, ``N`` =
+        batch size, ``Z1``/``A1`` = hidden pre-/post-ReLU values.)
+
+        Args:
+            X: Board features of shape ``(781,)`` or ``(N, 781)``
+                (validated exactly as by :meth:`forward`).
+            labels: Integer move classes: a bare integer for a single
+                input, or shape ``(N,)`` for a batch; each value in
+                ``0 .. output_size - 1``.
+
+        Returns:
+            A dict ``{"W1", "b1", "W2", "b2"}`` — one gradient array
+            per parameter, **same shapes as the parameters themselves**,
+            averaged over the batch (gradients of the *mean* loss).
+            The parameters are **not** modified; applying gradients is
+            a later step (training).
+
+        Raises:
+            TypeError: If ``labels`` are not integers.
+            ValueError: If ``X`` or ``labels`` have invalid shapes, or
+                a label is outside ``0 .. output_size - 1``.
+        """
+        X2d, Z1, A1, logits, _single = self._forward_with_cache(X)
+        labels = self._check_labels(labels, X2d.shape[0])
+        n = X2d.shape[0]
+
+        # --- Step 1: gradient of the mean loss w.r.t. the logits ---------
+        # (P - Y) / N, where Y is the one-hot matrix of true labels.
+        # Instead of building Y, start from P and subtract 1.0 at each
+        # example's true class — the only place Y differs from zero.
+        P = softmax(logits)  # (N, 4272) predicted probabilities
+        dlogits = P.copy()  # (N, 4272)
+        dlogits[np.arange(n), labels] -= 1.0
+        dlogits /= n  # mean over the batch
+
+        # --- Step 2: output-layer gradients ------------------------------
+        # Same outer-product pattern as the forward matrix multiply,
+        # with the operand order swapped and one side transposed.
+        dW2 = A1.T @ dlogits  # (256,N) @ (N,4272) = (256, 4272)
+        db2 = dlogits.sum(axis=0)  # (4272,) — summed over the batch
+
+        # --- Step 3: push the gradient back through W2 -------------------
+        # "Which combination of hidden activations produced this error?"
+        dA1 = dlogits @ self.W2.T  # (N,4272) @ (4272,256) = (N, 256)
+
+        # --- Step 4: back through the ReLU -------------------------------
+        # The ReLU derivative is 1 where Z1 > 0 and 0 elsewhere: a unit
+        # that stayed switched off cannot pass any gradient upstream.
+        dZ1 = dA1 * (Z1 > 0)  # (N, 256)
+
+        # --- Step 5: hidden-layer gradients ------------------------------
+        dW1 = X2d.T @ dZ1  # (781,N) @ (N,256) = (781, 256)
+        db1 = dZ1.sum(axis=0)  # (256,)
+
+        return {"W1": dW1, "b1": db1, "W2": dW2, "b2": db2}
 
     def predict(self, X: np.ndarray):
         """Return the most probable move class and its probability.
