@@ -80,6 +80,12 @@ from chessmovenet.moves import OUTPUT_SIZE
 INPUT_SIZE = BOARD_FEATURE_SIZE  # 781 features per encoded position
 HIDDEN_SIZE = 256  # neurons in the single hidden layer
 
+# The names of every trainable parameter, in a fixed order.  Modules
+# that update (train.py) or persist (checkpoint.py) the weights use
+# this tuple as the single source of truth for "what a trained model
+# is made of".
+PARAMETER_NAMES = ("W1", "b1", "W2", "b2")
+
 
 def relu(z: np.ndarray) -> np.ndarray:
     """Rectified linear unit: ``max(0, z)``, applied element-wise.
