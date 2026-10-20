@@ -38,12 +38,18 @@ explainable. Course project.
 | Training loop (mini-batch gradient descent) | `train.py` | done |
 | Checkpoints & history (no pickle, safe reload) | `checkpoint.py` | done |
 | Accuracy tracking (top-1 / top-5, raw classes) | `train.py` `evaluate_accuracy` | done |
-| Bonus: sigmoid/tanh, momentum/Adam, layer experiments | — | **remaining** |
-| Final test-set evaluation (once, at the very end) | — | **after all tuning** |
+| Required 3-layer, one-neuron gradient-descent demonstration | `scripts/three_layer_gradient_descent.py` | done |
+| Final held-out test-set evaluation | `scripts/evaluate_checkpoint.py` | done |
+| Bonus: sigmoid/tanh, momentum/Adam, layer experiments | — | optional / remaining |
 
 The numerical gradient check (analytical vs. finite-difference gradients on a
 tiny network) passes, so the forward/backward math is verified correct before
 any training begins.
+
+The completed 15-epoch checkpoint was evaluated once on the held-out test
+split: loss **7.196366**, top-1 **5.9210%**, and top-5 **10.8900%** over
+16,281 positions. Re-run `scripts/evaluate_checkpoint.py` to reproduce the
+result from the saved checkpoint.
 
 Known limitations, deliberate for now: promotion piece type is collapsed into
 the from-to class (`e7e8q` == `e7e8`), and predictions are not filtered for
@@ -99,6 +105,10 @@ All commands run from the project root with the venv active and `PYTHONPATH=src`
 # Run the test suite.
 PYTHONPATH=src python -m pytest tests/ -v
 
+# Run the small course demonstration: three dense layers, one neuron in each,
+# batched forward/backpropagation, mean-squared-error loss, and gradient descent.
+PYTHONPATH=src python scripts/three_layer_gradient_descent.py
+
 # Train on the real dataset (training + validation only; the test set
 # is never loaded). Defaults: 3 epochs, batch 128, lr 0.001, seed 0.
 # Writes artifacts/checkpoint.npz and artifacts/history.npz; refuses to
@@ -138,6 +148,11 @@ PYTHONPATH=src python -m chessmovenet.train --epochs 3 --overwrite
 # 15-epoch history produced above; pass a different path to plot another run.
 PYTHONPATH=src python scripts/plot_history.py
 PYTHONPATH=src python scripts/plot_history.py artifacts/history_ep15.npz
+
+# Evaluate the selected final checkpoint on the held-out test split.
+# Do not use this result to tune hyperparameters; it is the final score.
+PYTHONPATH=src python scripts/evaluate_checkpoint.py \
+  --checkpoint artifacts/checkpoint_ep15.npz
 
 # How to read the graphs:
 # - Loss curves: train and val loss should both trend downward.  If val loss
