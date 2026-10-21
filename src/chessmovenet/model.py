@@ -1,72 +1,4 @@
-"""A minimal fully connected neural network that predicts chess moves.
-
-The network learns to imitate a player: given the 781-feature encoding of
-a board position (see :mod:`chessmovenet.encode`), it produces one score
-per move class (see :mod:`chessmovenet.moves`).  Only NumPy is used —
-every line below is the honest arithmetic that ML frameworks normally
-hide behind their own abstractions.
-
-Default architecture
---------------------
-
-::
-
-    781 inputs -> 256 hidden units (ReLU) -> 4272 logits -> softmax?
-
-Layer by layer:
-
-1. **Hidden layer** — ``Z1 = X @ W1 + b1`` then ``A1 = relu(Z1)``.
-   781 numbers go in, 256 come out.  Each hidden neuron computes a
-   weighted sum of the inputs; after training, neurons tend to respond
-   to useful *patterns* of pieces and features.  ReLU (``max(0, z)``)
-   keeps only positive evidence and zeroes the rest.  This is what
-   makes the network *non-linear*: without it, stacking layers would
-   collapse algebraically into one big matrix multiply, no matter how
-   many layers we add.
-
-2. **Output layer** — ``logits = A1 @ W2 + b2``.  256 numbers go in,
-   4272 come out — one **logit** (raw score) per possible move class.
-   Logits are unbounded real numbers: a bigger logit means "the network
-   leans toward this class", but logits are **not** probabilities —
-   they can be negative, exceed 1, and do not sum to 1.
-
-3. **Softmax** (applied only on request) — turns the 4272 logits of
-   each row into 4272 numbers in ``(0, 1)`` that sum to 1: a
-   probability distribution over the move classes.  See :func:`softmax`
-   for the numerically stable implementation.
-
-Weight initialization (He / Kaiming)
-------------------------------------
-Weights are drawn from ``N(0, sqrt(2 / fan_in))``, where ``fan_in`` is
-the number of inputs a unit receives (781 for the hidden layer, 256 for
-the output layer).  ReLU zeroes roughly half of its inputs, so a plain
-``1/fan_in`` scale would shrink signals as they pass through; the
-factor ``2`` compensates for exactly that and keeps the size of
-activations roughly stable from layer to layer.  Biases start at zero:
-zero is neutral, and the symmetric start means the fresh network is
-"undecided" rather than accidentally favoring some classes.
-
-Reproducibility
----------------
-Passing a ``seed`` creates the weights from a local
-``np.random.default_rng(seed)`` stream, so two networks built with the
-same seed get bit-identical parameters and building a network never
-disturbs NumPy's global random state.
-
-Legality
---------
-The network scores **all** 4272 classes for every position, including
-moves that are illegal in that position (a rook sliding like a queen,
-a pawn jumping two squares from the third rank, ...).  Nothing here
-filters by legality: the highest-probability move is the network's raw
-opinion, and a caller that needs playable moves must combine it with a
-legality check.  This module deliberately stays chess-agnostic — it
-only ever sees vectors of numbers.
-
-The hidden layer count and widths can be changed with ``hidden_sizes``.
-The default remains one 256-unit hidden layer. Backpropagation is implemented
-here; training and checkpoint handling live in their own modules.
-"""
+"""NumPy feed-forward classifier that scores chess move classes."""
 
 from __future__ import annotations
 
@@ -75,7 +7,7 @@ import numpy as np
 from chessmovenet.encode import BOARD_FEATURE_SIZE
 from chessmovenet.moves import OUTPUT_SIZE
 
-# Shared input/output dimensions.
+# Model dimensions shared with the board and move encoders.
 INPUT_SIZE = BOARD_FEATURE_SIZE  # 781 features per encoded position
 HIDDEN_SIZE = 256  # neurons in the single hidden layer
 
@@ -251,17 +183,10 @@ class ChessMoveNet:
                 f"got {activation!r}"
             )
 
-        # --- Reproducible random initialization -------------------------
-        # default_rng(seed) is a local, isolated random stream: the same
-        # seed always yields bit-identical weights, and using it never
-        # touches np.random's global state.
+        # A local RNG keeps initialization reproducible without global state.
         rng = np.random.default_rng(seed)
 
-        # He (Kaiming) initialization: normal noise with standard
-        # deviation sqrt(2 / fan_in), scaled so that ReLU keeps the
-        # typical size of activations stable from layer to layer (see
-        # the module docstring).  astype(np.float32) matches the dtype
-        # of encode_board's output, keeping all arithmetic in float32.
+        # He initialization for ReLU; keep weights in float32.
         for layer, (fan_in, fan_out) in enumerate(
             zip(self.layer_sizes[:-1], self.layer_sizes[1:]), start=1
         ):

@@ -1,57 +1,4 @@
-"""Cross-entropy loss for move-class prediction.
-
-The loss is the network's report card: one number saying how badly it
-predicted the moves of a batch.  Training (a later phase) will try to
-make this number small.
-
-The formula
------------
-For one position with logits ``z`` (4,272 raw scores) and true label
-``y`` (the move actually played), cross-entropy is
-
-.. math::
-
-    L = -\\log p_y
-
-where ``p = softmax(z)`` is the predicted probability distribution.
-Over a batch of ``N`` positions we take the mean:
-
-.. math::
-
-    L = -\\frac{1}{N} \\sum_{i=1}^{N} \\log p^{(i)}_{y_i}
-
-In plain language: look at the probability the network gave the move
-that was *actually played*; take ``-log`` of it.  Confident and right
-→ probability near 1 → ``-log(1) = 0`` loss.  Confident and wrong →
-probability near 0 → ``-log(0)`` blows up toward infinity.  The mean
-spreads the score evenly over the batch.
-
-Why not just compute softmax, then ``-log``?
---------------------------------------------
-Because softmax can *underflow*: if one logit is far larger than the
-true class's logit, the true class's probability rounds to exactly
-``0.0`` in float32, and ``log(0) = -inf`` → a ruined (NaN) loss.  So
-this module never forms those tiny probabilities.  Instead it uses the
-**log-sum-exp** identity, which is algebraically the same expression:
-
-.. math::
-
-    -\\log p_y = \\log \\sum_j e^{z_j} - z_y
-
-Two properties make it safe:
-
-1. Each row of logits is first shifted by its own maximum.  This is a
-   mathematical no-op (the shift cancels between numerator and
-   denominator of the softmax), but it guarantees every ``exp()``
-   argument is ``<= 0`` — ``exp`` can then only *underflow* gently to
-   0, never overflow to ``inf``.
-2. The largest term of the sum becomes ``exp(0) = 1``, so the ``log``
-   of the sum is always ``>= 0`` and well-defined.
-
-The result is the same loss a naive implementation would give whenever
-the naive one works at all — but it keeps working with logits of
-``+/-1e4`` (see the tests).
-"""
+"""Stable mean cross-entropy loss for multiclass logits."""
 
 from __future__ import annotations
 
@@ -101,18 +48,13 @@ def _check(
     if n == 0:
         raise ValueError("logits must contain at least one example")
     if n_classes == 0:
-        # Without at least one class there is no move to score, and the
-        # label range below would degenerate to the nonsense "0 .. -1".
+        # A zero-width class axis has no valid label range.
         raise ValueError(
             "logits must contain at least one class column, but the "
             "last axis has width 0"
         )
 
-    # Non-finite logits (NaN or +/-inf) usually mean something upstream
-    # exploded — an overflow during training, or NaN features in the
-    # input.  Caught here, the error names the real problem; left alone,
-    # they would silently turn the loss (and later every weight) into
-    # NaN with no warning at all.
+    # Reject invalid scores before they propagate NaNs through training.
     n_bad = int(logits.size - np.count_nonzero(np.isfinite(logits)))
     if n_bad:
         raise ValueError(

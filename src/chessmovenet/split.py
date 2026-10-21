@@ -1,4 +1,4 @@
-"""Split a PGN-derived dataset into training, validation, and test sets.
+"""Build chronological, whole-game train, validation, and test splits.
 
 Why three sets?
 ----------------
@@ -91,7 +91,7 @@ from chessmovenet.data import extract_examples, my_color, read_games
 from chessmovenet.encode import BOARD_FEATURE_SIZE, encode_board
 from chessmovenet.moves import move_to_label
 
-# The 80/10/10 split, expressed as fractions of whole games.
+# Ratios apply to whole games, not individual moves.
 TRAIN_RATIO = 0.8
 VAL_RATIO = 0.1
 TEST_RATIO = 0.1
@@ -150,7 +150,7 @@ def _empty_arrays() -> tuple[np.ndarray, np.ndarray]:
 def _encode_one_game(
     game: chess.pgn.Game, username: str
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Encode one game's player moves as an ``(X_i, y_i)`` pair.
+    """Encode one game's moves while preserving its game boundary.
 
     This is the per-game core of ``dataset.build_dataset``: for every
     ``(fen_before_move, uci_move)`` pair that
@@ -260,7 +260,7 @@ def sort_games_chronologically(games: list[GameExamples]) -> list[GameExamples]:
 
 
 def _stack(games: list[GameExamples]) -> tuple[np.ndarray, np.ndarray]:
-    """Concatenate whole games into one ``(X, y)`` pair, in list order.
+    """Concatenate game arrays in order, or return standard empty arrays.
 
     Row ``k`` of the output ``X`` still pairs with label ``k`` of the
     output ``y``, because each game's ``X_i``/``y_i`` were built
@@ -277,7 +277,7 @@ def _stack(games: list[GameExamples]) -> tuple[np.ndarray, np.ndarray]:
 
 
 def split_games(games: list[GameExamples]) -> DatasetSplit:
-    """Cut per-game bundles into an 80/10/10 train/val/test split.
+    """Split chronologically at whole-game boundaries using 80/10/10 ratios.
 
     The games are sorted oldest-first, then divided at *game*
     boundaries: the oldest ``int(0.8 * n)`` games become training, the
@@ -318,8 +318,7 @@ def split_games(games: list[GameExamples]) -> DatasetSplit:
             stacklevel=2,
         )
 
-    # Slice the *game list* at the computed boundaries.  Each slice is
-    # then stacked into a single (X, y) pair, preserving order.
+    # Stack each game slice into its split arrays.
     X_train, y_train = _stack(ordered[:n_train])
     X_val, y_val = _stack(ordered[n_train:n_train_and_val])
     X_test, y_test = _stack(ordered[n_train_and_val:])
@@ -337,7 +336,7 @@ def split_games(games: list[GameExamples]) -> DatasetSplit:
 def split_dataset_chronologically(
     pgn_path: str | Path, username: str
 ) -> DatasetSplit:
-    """One-call helper: PGN file -> chronological 80/10/10 split.
+    """Build, order, and split a player's PGN games in one call.
 
     Combines the three building blocks:
 

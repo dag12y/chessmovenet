@@ -1,35 +1,4 @@
-"""Read PGN games and extract supervised move examples.
-
-This is the first data-reading module of ChessMoveNet. It answers three
-questions about a PGN file of chess games:
-
-1. Which games are in the file?      -> :func:`read_games`
-2. Which color did a player play?    -> :func:`my_color`
-3. What positions did they see?      -> :func:`extract_examples`
-
-Everything here is deliberately simple: plain functions, descriptive names,
-and no board encoding or machine-learning code. The only dependency is
-``python-chess``.
-
-Key ``python-chess`` concepts used in this module:
-
-- ``chess.pgn.read_game(handle)`` reads **one** game from a text file that is
-  already open, and returns ``None`` once the end of the file is reached.
-  Calling it repeatedly therefore walks a PGN file game by game without ever
-  loading the whole file into memory.
-- ``game.headers`` is a mapping of PGN tag names (``"White"``, ``"Black"``,
-  ``"Date"``, ...) to their string values.
-- ``game.board()`` returns a fresh :class:`chess.Board` set up in the game's
-  starting position (from the ``FEN`` tag if present, otherwise the standard
-  starting position).
-- ``game.mainline_moves()`` iterates over the moves actually played in the
-  game, in order.
-- ``board.turn`` is ``chess.WHITE`` (``True``) when it is White's turn to
-  move and ``chess.BLACK`` (``False``) when it is Black's.
-- ``board.fen()`` renders the current position as a
-  `FEN <https://en.wikipedia.org/wiki/Forsyth%E2%80%93Edwards_Notation>`_
-  string, and ``move.uci()`` renders a move in UCI notation (``"e2e4"``).
-"""
+"""Read PGN games and extract a player's positions and moves."""
 
 from __future__ import annotations
 
@@ -41,12 +10,7 @@ import chess.pgn
 
 
 def read_games(path: str | Path) -> Iterator[chess.pgn.Game]:
-    """Lazily yield each game stored in a PGN file.
-
-    The file is opened in text mode and parsed one game at a time by
-    :func:`chess.pgn.read_game`, which returns ``None`` at end of file.
-    Because this is a generator, callers can stream through tens of
-    thousands of games while only one game is in memory at a time.
+    """Yield games from a PGN file in file order.
 
     Args:
         path: Path to the PGN file (UTF-8 text).
@@ -63,11 +27,7 @@ def read_games(path: str | Path) -> Iterator[chess.pgn.Game]:
 
 
 def my_color(game: chess.pgn.Game, username: str) -> bool | None:
-    """Return which side ``username`` played in ``game``.
-
-    Reads the ``White`` and ``Black`` PGN headers and compares them to
-    ``username`` ignoring case, because Chess.com usernames may differ only
-    in capitalization between game records.
+    """Return the player's color, or ``None`` if they are absent.
 
     Args:
         game: A parsed PGN game.
@@ -91,15 +51,9 @@ def my_color(game: chess.pgn.Game, username: str) -> bool | None:
 def extract_examples(
     game: chess.pgn.Game, username: str
 ) -> list[tuple[str, str]]:
-    """Extract ``(fen_before_move, uci_move)`` pairs for one player's moves.
+    """Return ``(fen_before_move, uci_move)`` pairs for the player.
 
-    Replays the game from its starting position on a fresh board. Before
-    every move the position to move is snapshotted with ``board.fen()``, so
-    each pair records *the position the player actually saw when choosing
-    the move* — exactly the (position -> move) input/target pair a
-    supervised model needs. Only the moves of the requested player are
-    recorded; the opponent's moves are still pushed onto the board so the
-    positions stay in sync, but they are not returned.
+    Opponent moves update the board but are not included.
 
     Args:
         game: A parsed PGN game.
@@ -114,7 +68,7 @@ def extract_examples(
     if color is None:
         return []
 
-    board = game.board()  # Fresh board in the game's starting position.
+    board = game.board()
     examples: list[tuple[str, str]] = []
 
     for move in game.mainline_moves():

@@ -47,9 +47,7 @@ from chessmovenet.checkpoint import save_checkpoint, save_history
 from chessmovenet.loss import cross_entropy_loss
 from chessmovenet.model import PARAMETER_NAMES, ChessMoveNet
 
-# PARAMETER_NAMES now lives in chessmovenet.model (next to the
-# parameters themselves); importing it here keeps
-# ``from chessmovenet.train import PARAMETER_NAMES`` working.
+# Re-exported for compatibility with existing imports.
 
 
 def _check_positive_int(value, name: str) -> int:
@@ -163,11 +161,7 @@ def iterate_minibatches(
         ValueError: If ``X`` is not 2-D, ``y`` is not 1-D, their example
             counts differ, the dataset is empty, or ``batch_size < 1``.
     """
-    # --- Validation, done eagerly (not inside the generator) ----------
-    # A generator body does not run until the first next() call, so a
-    # mistake in the arguments would otherwise stay hidden until the
-    # training loop is already underway.  Validating here means a bad
-    # call fails at the call site, where the bug actually is.
+    # Validate before returning the lazy batch generator.
     X = np.asarray(X)
     y = np.asarray(y)
     if X.ndim != 2:
@@ -374,8 +368,7 @@ def evaluate_loss(
     """
     total_loss = 0.0  # sum of (batch loss * batch size)
     total_rows = 0  # sum of batch sizes
-    # seed only controls the *order* rows are visited; a weighted mean
-    # is order-independent, so any fixed seed gives the same answer.
+    # Shuffling does not change the weighted mean loss.
     for X_batch, y_batch in iterate_minibatches(
         X, y, batch_size=batch_size, seed=0
     ):
@@ -556,9 +549,7 @@ def train(
         ValueError: If any setting is out of range, or a data pair has
             mismatched counts / is empty.
     """
-    # Fail fast on bad settings *before* the first epoch starts --
-    # a typo in --epochs 0 should not cost a minute of compute to
-    # discover.
+    # Validate training settings before the first epoch.
     epochs = _check_positive_int(epochs, "epochs")
     batch_size = _check_positive_int(batch_size, "batch_size")
     lr = _check_learning_rate(lr)
@@ -592,8 +583,7 @@ def train(
             )
         if X.shape[0] == 0:
             raise ValueError(f"{tag}: cannot train or evaluate on 0 rows")
-    # Keep the normalized arrays (asarray is a no-op for ndarrays, so
-    # no copies of the 369 MB matrix are made here).
+    # Avoid copying already-normalized arrays.
     X_train, y_train = np.asarray(X_train), np.asarray(y_train)
     X_val, y_val = np.asarray(X_val), np.asarray(y_val)
 
@@ -738,9 +728,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # --- Fail fast, before loading 471 MB or training for minutes ----
-    # Output paths are validated first so a refusal (existing file
-    # without --overwrite, missing .npz suffix) costs zero compute.
+    # Validate output paths before loading data or training.
     for flag, raw in (
         ("--checkpoint", args.checkpoint),
         ("--history", args.history),
@@ -754,16 +742,13 @@ def main() -> None:
                 f"--overwrite or choose another path"
             )
 
-    # Load the archive once and touch only the four arrays we need.
-    # An NpzFile reads each member lazily on demand (data[key]), so the
-    # test rows are never even read from disk.
+    # Load only the training and validation arrays; test data stays untouched.
     data = np.load(args.data)
     try:
         X_train, y_train = data["X_train"], data["y_train"]
         X_val, y_val = data["X_val"], data["y_val"]
     finally:
-        # Each member is fully decompressed into memory on access, so
-        # the archive can be closed immediately afterwards.
+        # Arrays are materialized before the archive closes.
         data.close()
     print(
         f"loaded {args.data}: "
@@ -807,8 +792,7 @@ def main() -> None:
         flush=True,
     )
 
-    # Persist the results (paths were validated before training; the
-    # overwrite=False guard inside each saver still applies).
+    # Save training results.
     save_checkpoint(args.checkpoint, net, overwrite=args.overwrite)
     save_history(args.history, history, overwrite=args.overwrite)
     print(f"saved checkpoint -> {args.checkpoint}", flush=True)

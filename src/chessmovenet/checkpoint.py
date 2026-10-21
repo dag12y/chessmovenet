@@ -1,31 +1,4 @@
-"""Checkpointing: save and reload trained weights and training history.
-
-Two file formats, both plain NumPy ``.npz`` archives:
-
-- **Checkpoint** -- the four trained parameter arrays ``W1, b1, W2,
-  b2``.  Loading one rebuilds a :class:`~chessmovenet.model.ChessMoveNet`
-  with *bit-identical* weights, ready for evaluation or inference.
-- **History** -- one entry per epoch: ``epoch``, ``train_loss``,
-  ``val_loss``, ``seconds``.  Small arrays you can reload later to plot
-  or compare runs.
-
-Why no pickle
--------------
-``np.savez`` stores each array as a raw ``.npy`` payload.  Because
-every value here is plain numeric data (float32 weights, float64
-losses, int64 epoch numbers), the files load with NumPy's *default*
-``allow_pickle=False``.  Pickled ``.npz`` files can execute arbitrary
-code when opened, which makes them unsafe to load from untrusted
-sources -- this module never writes them, and :func:`load_checkpoint`
-explicitly opens with ``allow_pickle=False`` to prove it.
-
-Overwrite policy
-----------------
-Neither saver ever replaces an existing file unless ``overwrite=True``
-is passed: a finished training run must not be destroyed by an
-accidental re-run.  Existing files raise ``FileExistsError`` with the
-exact flag needed to proceed.
-"""
+"""Save and load model checkpoints and per-epoch training history."""
 
 from __future__ import annotations
 
@@ -36,13 +9,10 @@ import numpy as np
 
 from chessmovenet.model import PARAMETER_NAMES, ChessMoveNet
 
-# What a history file must contain (train() returns the last three;
-# "epoch" is derived as 1..N when saving if the caller omits it).
+# Required history columns; epochs are generated if omitted.
 HISTORY_KEYS = ("epoch", "train_loss", "val_loss", "seconds")
 
-# Accuracy columns written when the caller provides them (Step 11).
-# They are optional so history files from older runs -- like the
-# 3-epoch baseline, which has none -- keep loading unchanged.
+# Optional columns preserve compatibility with older history files.
 OPTIONAL_HISTORY_KEYS = (
     "train_acc_top1",
     "train_acc_top5",
@@ -99,12 +69,8 @@ def save_checkpoint(
         name: np.asarray(getattr(net, name), dtype=np.float32)
         for name in net.parameter_names
     }
-    # A Unicode scalar is safe with allow_pickle=False and lets a loaded model
-    # retain whether its hidden layer uses ReLU, sigmoid, or tanh.  Older
-    # checkpoints have no such field and are treated as ReLU below.
+    # Keep activation metadata as a string scalar; older files default to ReLU.
     arrays["activation"] = np.asarray(net.activation)
-    # np.savez writes numeric arrays with pickle disabled on read;
-    # no object arrays ever enter the file.
     np.savez(path, **arrays)
 
 
@@ -133,9 +99,7 @@ def load_checkpoint(path) -> ChessMoveNet:
     if not path.is_file():
         raise FileNotFoundError(f"no checkpoint found at {path}")
 
-    # allow_pickle=False is the default and is kept explicit here: a
-    # file that *needs* pickle to load is a file this module never
-    # produced, and loading it would be a code-execution risk.
+    # Checkpoints use plain arrays and never require pickle.
     with np.load(path, allow_pickle=False) as stored:
         weight_layers = sorted(
             int(match.group(1))
@@ -244,7 +208,7 @@ def save_history(path, history: dict, *, overwrite: bool = False) -> None:
             f"(need {list(HISTORY_KEYS)})"
         )
 
-    # Required columns first, then any accuracy columns the caller has.
+    # Write required columns before optional accuracy columns.
     keys = list(HISTORY_KEYS[1:]) + [
         k for k in OPTIONAL_HISTORY_KEYS if k in history
     ]
@@ -303,8 +267,7 @@ def save_history(path, history: dict, *, overwrite: bool = False) -> None:
         epoch = np.arange(1, n + 1, dtype=np.int64)
 
     _check_writable(path, overwrite)
-    # **columns writes exactly what was validated: epoch + required
-    # columns + whichever accuracy columns were present in the dict.
+    # Save only the validated columns.
     np.savez(path, epoch=epoch, **columns)
 
 
