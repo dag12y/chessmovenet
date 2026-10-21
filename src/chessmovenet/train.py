@@ -189,18 +189,14 @@ def iterate_minibatches(
 
     n = X.shape[0]
 
-    # One shuffle per call.  permutation(n) is a random ordering of the
-    # indices 0 .. n-1 -- roughly 0.9 MB of int64 for 118006 examples,
-    # instead of the 369 MB a full shuffled copy of X would cost.
+    # Shuffle indices without copying the full dataset.
     order = np.random.default_rng(seed).permutation(n)  # (n,)
 
     def batches():
         """Inner generator: validation is done, now just feed batches."""
         for start in range(0, n, batch_size):
             idx = order[start : start + batch_size]  # (b,)
-            # Fancy indexing gathers exactly these rows as a fresh
-            # copy (~b x 781 floats).  The parent arrays are read-only
-            # here: shuffling never permutes X or y in place.
+            # Gather one mini-batch.
             yield X[idx], y[idx]
 
     return batches()
@@ -337,9 +333,7 @@ def update_parameters(
     for name in net.parameter_names:
         gradient = grads[name]
         parameter = getattr(net, name)
-        # The update itself: parameter = parameter - lr * gradient.
-        # "-=" computes into the existing array (no new allocation)
-        # and keeps float32, so memory stays flat epoch after epoch.
+        # Gradient descent: parameter -= learning_rate × gradient.
         parameter -= lr * gradient
 
 
@@ -479,13 +473,11 @@ def evaluate_accuracy(
                 "weights may have diverged"
             )
 
-        # Top-1: argmax over all classes (ties -> lowest index, stable).
+        # Best-scoring class.
         best = np.argmax(logits, axis=-1)  # (b,)
         top1_hits += int(np.count_nonzero(best == y_batch))
 
-        # Top-5: argsort ascending puts the largest scores last, so the
-        # final k5 columns are the top-k classes (unordered is fine --
-        # we only test membership).
+        # Check whether the label is in the five highest scores.
         top5_idx = np.argsort(logits, axis=-1)[:, -k5:]  # (b, k5)
         in_top5 = np.any(top5_idx == y_batch[:, np.newaxis], axis=-1)  # (b,)
         top5_hits += int(np.count_nonzero(in_top5))
@@ -618,7 +610,7 @@ def train(
     for epoch in range(epochs):
         started = time.perf_counter()
 
-        # --- Pass 1: learn from the training set ---------------------
+        # Learn from training batches.
         total_loss = 0.0
         total_rows = 0
         for X_batch, y_batch in iterate_minibatches(
@@ -637,9 +629,7 @@ def train(
 
         train_loss = total_loss / total_rows
 
-        # --- Pass 2: measure (never learn from) train and val ---------
-        # All four calls are forward-only; the weights the accuracy
-        # numbers are computed with are the epoch's final weights.
+        # Measure train and validation performance without updates.
         val_loss = evaluate_loss(net, X_val, y_val, batch_size=batch_size)
         train_acc = evaluate_accuracy(
             net, X_train, y_train, batch_size=batch_size

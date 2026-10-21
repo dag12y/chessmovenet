@@ -75,16 +75,11 @@ import numpy as np
 from chessmovenet.encode import BOARD_FEATURE_SIZE
 from chessmovenet.moves import OUTPUT_SIZE
 
-# The network consumes exactly what chessmovenet.encode produces and
-# emits exactly one score per class of chessmovenet.moves, so the sizes
-# are imported (single source of truth) rather than re-typed here.
+# Shared input/output dimensions.
 INPUT_SIZE = BOARD_FEATURE_SIZE  # 781 features per encoded position
 HIDDEN_SIZE = 256  # neurons in the single hidden layer
 
-# The names of every trainable parameter, in a fixed order.  Modules
-# that update (train.py) or persist (checkpoint.py) the weights use
-# this tuple as the single source of truth for "what a trained model
-# is made of".
+# Parameter order used by training and checkpointing.
 PARAMETER_NAMES = ("W1", "b1", "W2", "b2")
 
 
@@ -149,8 +144,7 @@ def softmax(logits: np.ndarray) -> np.ndarray:
         last axis (each row sums to ``1.0``), dtype float32 for
         float32 input.
     """
-    # keepdims=True keeps the max in shape (N, 1) so NumPy broadcasting
-    # subtracts one row-max from every element of the corresponding row.
+    # Subtract the row maximum for numerical stability.
     shifted = logits - np.max(logits, axis=-1, keepdims=True)
     exp_values = np.exp(shifted)
     return exp_values / np.sum(exp_values, axis=-1, keepdims=True)
@@ -208,7 +202,7 @@ class ChessMoveNet:
             TypeError: If a size is not an integer.
             ValueError: If a size is less than 1.
         """
-        # --- Sizes: small guards so mistakes surface immediately ---
+        # Validate layer sizes.
         if hidden_sizes is None:
             hidden_sizes = (hidden_size,)
         elif not isinstance(hidden_sizes, (tuple, list)) or not hidden_sizes:
@@ -321,16 +315,11 @@ class ChessMoveNet:
                 f"{X.shape[-1]}"
             )
         if X.ndim == 2 and X.shape[0] == 0:
-            # An empty batch is almost always a slicing bug upstream
-            # (e.g. an off-by-one in a future training loop).  Failing
-            # here with a clear message beats the cryptic reduction
-            # error NumPy would raise inside softmax.
+            # Reject empty batches early.
             raise ValueError("X must contain at least one position")
         n_bad = int(X.size - np.count_nonzero(np.isfinite(X)))
         if n_bad:
-            # NaN/inf features would silently poison every logit and
-            # gradient downstream; name the problem while it is still
-            # closest to its cause (the input, not the weights).
+            # Reject invalid feature values.
             raise ValueError(
                 f"X must be finite (no NaN or infinity), but "
                 f"{n_bad} feature value(s) are not"
@@ -528,18 +517,13 @@ class ChessMoveNet:
         labels = self._check_labels(labels, X2d.shape[0])
         n = X2d.shape[0]
 
-        # --- Step 1: gradient of the mean loss w.r.t. the logits ---------
-        # (P - Y) / N, where Y is the one-hot matrix of true labels.
-        # Instead of building Y, start from P and subtract 1.0 at each
-        # example's true class — the only place Y differs from zero.
+        # Softmax-cross-entropy gradient: (P - Y) / N.
         P = softmax(logits)  # (N, 4272) predicted probabilities
         dlogits = P.copy()  # (N, 4272)
         dlogits[np.arange(n), labels] -= 1.0
         dlogits /= n  # mean over the batch
 
-        # --- Step 2: output-layer gradients ------------------------------
-        # Same outer-product pattern as the forward matrix multiply,
-        # with the operand order swapped and one side transposed.
+        # Backpropagate through each dense layer.
         gradients: dict[str, np.ndarray] = {}
         output_layer = len(self.layer_sizes) - 1
         d_activation = dlogits
@@ -549,9 +533,7 @@ class ChessMoveNet:
             gradients[f"b{layer}"] = d_activation.sum(axis=0)
             d_previous = d_activation @ getattr(self, f"W{layer}").T
             if layer > 1:
-                # The cached post-activation is enough to compute each
-                # supported derivative; recover the pre-activation from
-                # the layer's cached input and weights for clarity.
+                # Rebuild the pre-activation for its derivative.
                 previous_z = activations[layer - 2] @ getattr(
                     self, f"W{layer - 1}"
                 ) + getattr(self, f"b{layer - 1}")
@@ -621,10 +603,7 @@ class ChessMoveNet:
         if single:
             probabilities = probabilities[np.newaxis, :]  # -> (1, 4272)
 
-        # argsort sorts ascending, so the k largest entries sit at the
-        # end; slicing them off and flipping gives descending order.
-        # (With only 4272 classes a full sort is cheap — no need for
-        # the more complex np.argpartition.)
+        # Sort highest probabilities first.
         order = np.argsort(probabilities, axis=-1)  # (N, 4272)
         top_labels = order[:, -k:][:, ::-1]  # (N, k), best class first
         top_probs = np.take_along_axis(

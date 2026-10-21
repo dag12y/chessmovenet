@@ -107,7 +107,7 @@ from __future__ import annotations
 import chess
 import numpy as np
 
-# --- Fixed layout sizes and offsets -----------------------------------------
+# Feature layout constants
 
 SQUARES_PER_PLANE = 64
 PIECE_PLANES = 12
@@ -142,7 +142,7 @@ def _build_piece_plane_index() -> dict[tuple[bool, int], int]:
     return mapping
 
 
-# Public constant documenting the exact plane layout (also handy in tests).
+# Maps each piece type/color to one of 12 planes.
 PIECE_PLANE_INDEX: dict[tuple[bool, int], int] = _build_piece_plane_index()
 
 
@@ -164,19 +164,15 @@ def encode_board(board: chess.Board) -> np.ndarray:
     """
     features = np.zeros(BOARD_FEATURE_SIZE, dtype=np.float32)
 
-    # --- 1. Piece placement: one 1.0 per piece, in its (color, type) plane ---
-    # board.piece_map() returns {square: Piece}, e.g. {4: Piece('P', WHITE)}.
-    # python-chess square numbers are already a1=0 ... h8=63, which is the
-    # within-plane index we want.
+    # Mark occupied squares in their piece plane.
     for square, piece in board.piece_map().items():
         plane = PIECE_PLANE_INDEX[(piece.color, piece.piece_type)]
         features[plane * SQUARES_PER_PLANE + square] = 1.0
 
-    # --- 2. Side to move: 1.0 for White, 0.0 for Black ---
+    # Side to move: White = 1, Black = 0.
     features[SIDE_TO_MOVE_INDEX] = 1.0 if board.turn == chess.WHITE else 0.0
 
-    # --- 3. Castling rights, in the documented order ---
-    # The helpers verify the rights mask *and* that king/rook are home.
+    # Castling rights.
     features[WHITE_KINGSIDE_INDEX] = float(
         board.has_kingside_castling_rights(chess.WHITE)
     )
@@ -190,9 +186,7 @@ def encode_board(board: chess.Board) -> np.ndarray:
         board.has_queenside_castling_rights(chess.BLACK)
     )
 
-    # --- 4. En-passant target FILE (a=0 ... h=7); all zeros if none ---
-    # We use the raw board.ep_square (set after every double push), not the
-    # stricter has_legal_en_passant() — see the module docstring.
+    # One-hot en-passant file.
     if board.ep_square is not None:
         file_index = chess.square_file(board.ep_square)
         features[EN_PASSANT_FILE_OFFSET + file_index] = 1.0

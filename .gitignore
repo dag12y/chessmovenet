@@ -68,3 +68,6 @@ wandb/
 # Preparation reports and processed datasets (personal data - never commit)
 reports/
 data/processed/
+
+# Personal presentation notes (kept only on this machine)
+presentation.md

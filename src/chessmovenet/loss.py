@@ -170,22 +170,14 @@ def cross_entropy_loss(logits: np.ndarray, labels) -> float:
     logits, labels = _check(logits, labels)
     n = logits.shape[0]
 
-    # --- Stable log-sum-exp, row by row ---------------------------------
-    # row_max has shape (N, 1): broadcasting subtracts one max per row.
-    # After the shift every value is <= 0, so exp() only ever underflows
-    # (to 0.0) instead of overflowing (to inf).
+    # Stable log-sum-exp.
     row_max = np.max(logits, axis=1, keepdims=True)  # (N, 1)
     shifted = logits - row_max  # (N, C), all <= 0
-    # log(sum(exp(shifted))) + row_max equals log(sum(exp(logits)))
-    # exactly, but is computed without building anything larger than
-    # exp(0) = 1.
     log_sum_exp = row_max[:, 0] + np.log(np.sum(np.exp(shifted), axis=1))
 
-    # --- Loss per example: log-sum-exp minus the true class's logit -----
-    # This equals -log(softmax(z)[y]) for every example.
+    # Negative log-probability of the correct class.
     true_logits = logits[np.arange(n), labels]  # (N,)
     per_example = log_sum_exp - true_logits  # (N,), each >= 0
 
-    # Mean over the batch: one scalar for the whole report card.
     return float(np.mean(per_example))
 

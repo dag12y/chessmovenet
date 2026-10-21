@@ -1,277 +1,160 @@
 # ChessMoveNet
 
-A chess move-prediction neural network built from scratch with NumPy only — no
-PyTorch, TensorFlow, or autograd. Given the encoding of a board position, it
-learns to imitate one player's moves. Every line is kept simple, readable, and
-explainable. Course project.
+ChessMoveNet is a chess move-prediction neural network built **from scratch with NumPy**. Given a chess position, it learns to predict the move a player is likely to make. No PyTorch, TensorFlow, or autograd is used: the forward pass, loss, backpropagation, and parameter updates are implemented explicitly.
 
-## How it fits together
+The repository also contains a FastAPI backend and React/Vite interface for playing against a trained checkpoint locally.
 
-```
-781 board features  ->  256 hidden units (ReLU)  ->  4272 move-class logits
-   encode.py               model.py                      moves.py
+## How it works
+
+```text
+PGN games → board/move examples → numeric encoding → neural-network training → predicted move
 ```
 
-- **Input**: `encode.py` turns a `chess.Board` into a 781-float vector
-  (piece planes, side to move, castling, en passant).
-- **Output**: `moves.py` maps each UCI move to one integer label in
-  `0 .. 4271` (from-square × 64 + to-square).
-- **Learning**: `model.py` holds the network (`forward`, `backward`),
-  `loss.py` holds the numerically stable cross-entropy loss,
-  `train.py` runs the mini-batch gradient-descent loop, and
-  `checkpoint.py` saves/reloads trained weights and training history.
-- **Data**: `data.py` reads PGN games, `dataset.py` builds `(X, y)` pairs,
-  `split.py` cuts them chronologically into train/val/test **by whole game**
-  (oldest 80% train, next 10% val, newest 10% test — no game in two sets).
-- `downloader.py` fetches games from the Chess.com API (pre-existing).
+The default classifier architecture is:
 
-## Status
-
-| Phase | Module | State |
-|-------|--------|-------|
-| PGN reading & move extraction | `data.py` | done |
-| 781-feature board encoding | `encode.py` | done |
-| 4,272-class move labels | `moves.py` | done |
-| Per-game dataset + chronological split | `dataset.py`, `split.py` | done |
-| Network: init, forward, predict, backprop | `model.py` | done |
-| Stable cross-entropy loss | `loss.py` | done |
-| Training loop (mini-batch gradient descent) | `train.py` | done |
-| Checkpoints & history (no pickle, safe reload) | `checkpoint.py` | done |
-| Accuracy tracking (top-1 / top-5, raw classes) | `train.py` `evaluate_accuracy` | done |
-| Required 3-layer, one-neuron gradient-descent demonstration | `scripts/three_layer_gradient_descent.py` | done |
-| Final held-out test-set evaluation | `scripts/evaluate_checkpoint.py` | done |
-| Bonus: Adam optimizer | `train.py` | done |
-| Bonus: Sigmoid and Tanh activations | `model.py`, `train.py` | done |
-| Bonus: configurable hidden layer sizes/depth | `model.py`, `train.py` | done |
-
-The numerical gradient check (analytical vs. finite-difference gradients on a
-tiny network) passes, so the forward/backward math is verified correct before
-any training begins.
-
-The completed 15-epoch checkpoint was evaluated once on the held-out test
-split: loss **7.196366**, top-1 **5.9210%**, and top-5 **10.8900%** over
-16,281 positions. Re-run `scripts/evaluate_checkpoint.py` to reproduce the
-result from the saved checkpoint.
-
-Known limitations, deliberate for now: promotion piece type is collapsed into
-the from-to class (`e7e8q` == `e7e8`), and predictions are not filtered for
-legality — combining with `moves.legal_mask` is a later phase.
-
-## Metrics: how to read top-1 and top-5
-
-Training reports two raw move-class accuracies per epoch, on both the
-training and the validation split:
-
-- **top-1** — the model's single highest-scoring move class is the move the
-  player actually played. With 4,272 classes this is a hard test; even a strong
-  model will often prefer a different (also reasonable) move.
-- **top-5** — the played move appears among the five highest-scoring classes.
-  This measures "was the right move at least *considered*?"
-
-Both are computed over **all 4,272 classes with no legality filtering** — a
-"hit" means the recorded label matched, *not* that the model suggested a
-playable move (the top-5 set may contain illegal moves for that position).
-This is intentional for Step 11: the metric is exactly `argmax`/`top-k` over
-the network's raw output, easy to verify by hand.
-
-The stricter **legal-move accuracy** — ranking only the moves allowed by the
-position (via `moves.legal_mask`) — is a *different* metric and is not
-silently mixed in. It requires per-position FENs, which the processed arrays
-don't carry, so it would need a dataset change first; it remains a candidate
-for a later step or the presentation.
-
-Rules of thumb while reading numbers: top-5 ≥ top-1 always; random guessing
-over 4,272 classes gives ≈ 0.02% top-1 and ≈ 0.12% top-5; the class-imbalanced
-baseline ("always guess the most common move") sits around 1.7% top-1 on this
-dataset — beating that baseline meaningfully is the first real milestone.
-
-## Layout
-
-```
-src/chessmovenet/   package: data, dataset, split, encode, moves, model,
-                    loss, train, checkpoint
-backend/            FastAPI game API; loads the selected model checkpoint
-frontend/           React/Vite chessboard and move-history interface
-requirements-api.txt FastAPI/Uvicorn dependencies for the local game server
-tests/              pytest suite
-artifacts/          checkpoint.npz + history.npz after training
-                    (generated, never committed)
-data/raw/           my Chess.com PGN (read-only, never committed)
-data/processed/     split.npz — train/val/test arrays (generated, never committed)
-reports/            preparation report (generated, never committed)
-progress.md         running summary of the project
+```text
+781 board features → 256 ReLU hidden units → 4,272 move logits → softmax probabilities
 ```
 
-## Play against the model
+| Component | Implementation |
+| --- | --- |
+| Input | 781 `float32` features: 12 piece planes (768 values), side to move, castling rights, and en-passant file |
+| Output | 4,272 move classes: 4,096 from/to combinations plus 176 promotion moves |
+| Forward pass | Vectorized dense layers using `X @ W + b`, activation, and optional softmax |
+| Loss | Numerically stable multiclass cross-entropy using log-sum-exp |
+| Learning | Manual backpropagation with mini-batch SGD; Adam is also available |
+| Data split | Chronological 80% / 10% / 10% train/validation/test split by complete game |
+| Verification | Central finite-difference gradient checking, safe `.npz` checkpoints, and automated tests |
 
-The local web app uses the six-epoch Adam checkpoint by default. The FastAPI
-server validates human moves with python-chess and has ChessMoveNet choose the
-highest-scoring legal reply. Games are stored in server memory while it runs.
+## Neural-network math
 
-Install the API and frontend dependencies once:
+For a mini-batch `X`, the network computes:
+
+```text
+Z₁ = XW₁ + b₁
+A₁ = ReLU(Z₁)
+logits = A₁W₂ + b₂
+probabilities = softmax(logits)
+```
+
+Cross-entropy measures the probability given to the move that was actually played. Backpropagation uses the chain rule to calculate how every weight and bias affected that error. Gradient descent then updates every parameter:
+
+```text
+parameter ← parameter − learning_rate × gradient
+```
+
+The model supports configurable hidden-layer widths and `relu`, `sigmoid`, or `tanh` activations. The default is a single 256-unit ReLU hidden layer.
+
+## Repository layout
+
+```text
+src/chessmovenet/
+  data.py          Read chess games from PGN files
+  downloader.py    Fetch Chess.com game data
+  dataset.py       Build board / move-label examples
+  split.py         Chronological, whole-game data splitting
+  encode.py        Convert a chess.Board to 781 features
+  moves.py         Convert moves to and from 4,272 class labels
+  model.py         Network, forward propagation, and backpropagation
+  loss.py          Stable cross-entropy
+  train.py         Mini-batches, SGD/Adam, and evaluation
+  checkpoint.py    Save and load models/history
+backend/            FastAPI game service
+frontend/           React/Vite chess interface
+scripts/            Evaluation, plots, and gradient-descent demonstration
+tests/              Automated tests
+```
+
+## Setup and testing
+
+Create a virtual environment and install the Python dependencies:
 
 ```bash
-.venv/bin/pip install -r requirements-api.txt
-cd frontend && npm install
+python -m venv .venv
+.venv/bin/pip install -r requirements-api.txt pytest
 ```
 
-Start the API from the repository root in one terminal:
+Run the test suite from the repository root:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m pytest tests/ -v
+```
+
+Run the small three-layer gradient-descent demonstration. It learns `y = 2x + 1` with batched forward passes, backpropagation, mean-squared error, and plain gradient descent:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/three_layer_gradient_descent.py
+```
+
+## Training and evaluation
+
+Training expects a processed split at `data/processed/split.npz`. Data and trained-model artifacts are ignored by Git because they can be large or personal.
+
+```bash
+PYTHONPATH=src .venv/bin/python -m chessmovenet.train \
+  --epochs 15 --batch-size 128 --lr 0.001 --seed 0 \
+  --checkpoint artifacts/checkpoint_ep15.npz \
+  --history artifacts/history_ep15.npz
+```
+
+Useful options:
+
+```bash
+--optimizer adam          # Adam optimizer
+--activation tanh         # Select hidden activation
+--hidden-sizes 256,128    # Use two hidden layers
+```
+
+Evaluate a selected checkpoint once on the held-out test set:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/evaluate_checkpoint.py \
+  --checkpoint artifacts/checkpoint_ep15.npz
+```
+
+## Results
+
+One completed 15-epoch checkpoint was evaluated on the held-out test split:
+
+| Metric | Result |
+| --- | ---: |
+| Test positions | 16,281 |
+| Cross-entropy loss | 7.196366 |
+| Top-1 accuracy | 5.9210% |
+| Top-5 accuracy | 10.8900% |
+
+Top-1 means the highest-scoring class matches the recorded move. Top-5 means the recorded move appears among the five highest-scoring classes. These are raw classification metrics across all 4,272 output classes, without legality filtering.
+
+## Play locally
+
+Install frontend packages once:
+
+```bash
+cd frontend
+npm install
+```
+
+Start the API from the repository root. A checkpoint must be available; the default location is `artifacts/checkpoint_adam_ep6.npz`.
 
 ```bash
 PYTHONPATH=src .venv/bin/uvicorn backend.app:app --reload
 ```
 
-Start Vite in another terminal:
+In another terminal, start the frontend:
 
 ```bash
-cd frontend && npm run dev
+cd frontend
+npm run dev
 ```
 
-Open `http://127.0.0.1:5173`, start a game, and play White. The default model
-checkpoint is `artifacts/checkpoint_adam_ep6.npz`; to use another checkpoint,
-set `CHESSMOVENET_CHECKPOINT` before starting Uvicorn. For example:
+Open the local Vite URL (normally `http://127.0.0.1:5173`). You play White; the backend validates your move, scores the board, and selects the highest-scoring **legal** reply. To select another model file, set `CHESSMOVENET_CHECKPOINT` before starting the API.
 
-```bash
-CHESSMOVENET_CHECKPOINT=artifacts/checkpoint_adam_256_128_ep6.npz \
-  PYTHONPATH=src .venv/bin/uvicorn backend.app:app --reload
-```
+## Limitations and next steps
 
-## Commands
+- Raw evaluation ranks all 4,272 move classes, including moves illegal in a particular position; the game app filters to legal moves before playing.
+- Chess move prediction is a difficult, high-class-count task; this compact dense model cannot represent every strategic pattern.
+- Natural next steps include richer board features, legality-aware training/evaluation, more data, and convolutional or attention-based architectures.
 
-All commands run from the project root with the venv active and `PYTHONPATH=src`:
+## Technologies
 
-```bash
-# Run the test suite.
-PYTHONPATH=src python -m pytest tests/ -v
-
-# Run the small course demonstration: three dense layers, one neuron in each,
-# batched forward/backpropagation, mean-squared-error loss, and gradient descent.
-PYTHONPATH=src python scripts/three_layer_gradient_descent.py
-
-# Train on the real dataset (training + validation only; the test set
-# is never loaded). Defaults: 3 epochs, batch 128, lr 0.001, seed 0.
-# Writes artifacts/checkpoint.npz and artifacts/history.npz; refuses to
-# overwrite existing outputs unless you add --overwrite.
-PYTHONPATH=src python -m chessmovenet.train --epochs 3 --seed 0
-
-# 15-epoch experiment (Step 11) -- NEW output paths, so the verified
-# 3-epoch baseline files are left untouched.  If either target file
-# already exists the command refuses to start (add --overwrite only
-# when you mean to replace THAT file):
-PYTHONPATH=src python -m chessmovenet.train \
-  --epochs 15 --batch-size 128 --lr 0.001 --seed 0 \
-  --checkpoint artifacts/checkpoint_ep15.npz \
-  --history artifacts/history_ep15.npz
-
-# Bonus: train with Adam. Use new output paths so baseline results are kept.
-PYTHONPATH=src python -m chessmovenet.train \
-  --epochs 15 --batch-size 128 --lr 0.001 --optimizer adam --seed 0 \
-  --checkpoint artifacts/checkpoint_adam_ep15.npz \
-  --history artifacts/history_adam_ep15.npz
-
-# Bonus: compare another hidden-layer activation on validation data.
-# Use new output paths and choose models by validation metrics only.
-PYTHONPATH=src python -m chessmovenet.train \
-  --epochs 6 --batch-size 128 --lr 0.001 --optimizer adam --activation tanh --seed 0 \
-  --checkpoint artifacts/checkpoint_adam_tanh_ep6.npz \
-  --history artifacts/history_adam_tanh_ep6.npz
-
-# Bonus: use two hidden layers, with 256 then 128 neurons.
-PYTHONPATH=src python -m chessmovenet.train \
-  --epochs 6 --batch-size 128 --lr 0.001 --optimizer adam \
-  --hidden-sizes 256,128 --seed 0 \
-  --checkpoint artifacts/checkpoint_adam_256_128_ep6.npz \
-  --history artifacts/history_adam_256_128_ep6.npz
-
-# Expected output format (numbers illustrative -- nothing is pre-
-# claimed about them; epoch time now includes accuracy measurement,
-# roughly +40% over loss-only epochs):
-#
-# loaded data/processed/split.npz: train (118006, 781), val (16246, 781) (test set untouched)
-# training: epochs=15 batch_size=128 lr=0.001 seed=0
-# epoch 1/15  train loss 8.3xxx top1 x.x% top5 xx.x%  val loss 8.3xxx top1 x.x% top5 xx.x%  3x.xs
-# ...
-# epoch 15/15  train loss x.xxxx top1 x.x% top5 xx.x%  val loss x.xxxx top1 x.x% top5 xx.x%  3x.xs
-# finished 15 epoch(s) in xxx.xs  |  final train loss x.xxxx top1 x.x%, val loss x.xxxx top1 x.x% top5 x.x%
-# saved checkpoint -> artifacts/checkpoint_ep15.npz
-# saved history    -> artifacts/history_ep15.npz
-#
-# Baseline reference (3-epoch run): train 8.3341 -> 8.2557 -> 8.1704,
-# val 8.3035 -> 8.2293 -> 8.1402, ~22 s/epoch (loss only, no accuracy).
-
-# Replace outputs from a previous run:
-PYTHONPATH=src python -m chessmovenet.train --epochs 3 --overwrite
-
-# Plot training history (Step 12) -- generates reports/loss_curves.png and
-# reports/accuracy_curves.png from the .npz history file.  Defaults to the
-# 15-epoch history produced above; pass a different path to plot another run.
-PYTHONPATH=src python scripts/plot_history.py
-PYTHONPATH=src python scripts/plot_history.py artifacts/history_ep15.npz
-
-# Evaluate the selected final checkpoint on the held-out test split.
-# Do not use this result to tune hyperparameters; it is the final score.
-PYTHONPATH=src python scripts/evaluate_checkpoint.py \
-  --checkpoint artifacts/checkpoint_ep15.npz
-
-# How to read the graphs:
-# - Loss curves: train and val loss should both trend downward.  If val loss
-#   stops improving while train loss keeps dropping, the model is overfitting.
-# - Accuracy curves: top-1 and top-5 are percentages (0..100).  Higher is better.
-#   Top-5 > top-1 means the correct move was usually among the top few guesses
-#   even when it wasn't the #1 pick.
-
-# Reload a trained checkpoint for inference (no retraining):
-PYTHONPATH=src python - <<'EOF'
-import numpy as np
-from chessmovenet.checkpoint import load_checkpoint, load_history
-
-net = load_checkpoint("artifacts/checkpoint.npz")
-history = load_history("artifacts/history.npz")
-print("epochs:", history["epoch"])
-print("val losses:", [round(v, 4) for v in history["val_loss"]])
-
-X = np.load("data/processed/split.npz")["X_val"][:1]   # one position
-label, confidence = net.predict(X[0])
-print("top prediction:", label, "confidence:", confidence)
-EOF
-
-# Regenerate data/processed/split.npz from the raw PGN
-# (~4,800 games; takes a few minutes).
-PYTHONPATH=src python - <<'EOF'
-from pathlib import Path
-import numpy as np
-from chessmovenet.split import split_dataset_chronologically
-
-split = split_dataset_chronologically("data/raw/dag12yi.pgn", "dag12yi")
-np.savez(
-    "data/processed/split.npz",
-    X_train=split.X_train, y_train=split.y_train,
-    X_val=split.X_val, y_val=split.y_val,
-    X_test=split.X_test, y_test=split.y_test,
-)
-for name in ("train.npz", "val.npz", "test.npz"):
-    (Path("data/processed") / name).unlink(missing_ok=True)
-print(split.X_train.shape, split.X_val.shape, split.X_test.shape)
-EOF
-
-# Smoke-test the math on real data (loss is finite, gradients have
-# the right shapes; nothing is trained or saved).
-PYTHONPATH=src python - <<'EOF'
-import numpy as np
-from chessmovenet.loss import cross_entropy_loss
-from chessmovenet.model import ChessMoveNet
-
-data = np.load("data/processed/split.npz")
-X, y = data["X_train"][:64], data["y_train"][:64]
-net = ChessMoveNet(seed=0)
-print("loss:", cross_entropy_loss(net.forward(X), y))
-print({k: v.shape for k, v in net.backward(X, y).items()})
-EOF
-```
-
-## Data safety
-
-`data/`, `data/processed/`, `reports/`, `artifacts/`, and `.venv` are in
-`.gitignore`. The raw PGN, all processed personal game data, and every
-trained checkpoint/history file are never committed.
-
+Python, NumPy, python-chess, FastAPI, Uvicorn, React, Vite, and pytest.
