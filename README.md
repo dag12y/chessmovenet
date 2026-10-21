@@ -80,6 +80,59 @@ Run the test suite from the repository root:
 PYTHONPATH=src .venv/bin/python -m pytest tests/ -v
 ```
 
+## Short commands
+
+After setup, the easiest way to use the project is with `make`:
+
+```bash
+make help       # List all available commands
+make test       # Run tests
+make demo       # Run the small gradient-descent example
+make download   # Download public Chess.com games
+make prepare USERNAME=your_name  # Build a dataset from the downloaded PGN
+make train      # Train for 3 epochs
+make plot       # Create training charts
+make evaluate   # Evaluate the latest checkpoint on the test set
+```
+
+To change the training length, pass `EPOCHS`. For example:
+
+```bash
+make train EPOCHS=15
+```
+
+`make train` saves to `artifacts/checkpoint_latest.npz` and
+`artifacts/history_latest.npz`. If those files already exist, choose new names
+instead of accidentally replacing a previous result:
+
+```bash
+make train EPOCHS=15 \
+  CHECKPOINT=artifacts/checkpoint_ep15_new.npz \
+  HISTORY=artifacts/history_ep15_new.npz
+```
+
+## Update with new Chess.com games
+
+To train on more recent public games, download a fresh PGN and rebuild the
+processed split before training:
+
+```bash
+# Enter the Chess.com username when prompted.
+make download
+
+# Rebuild data/processed/split.npz from data/raw/your_name.pgn.
+make prepare USERNAME=your_name
+
+# Train the new dataset.
+make train
+```
+
+`make download` uses Chess.com’s public API and stores the PGN in
+`data/raw/<username>.pgn`. It asks before replacing an existing PGN.
+`make prepare` deliberately replaces the current processed split, because it
+represents the newly selected training data. Both the raw PGN and processed
+arrays are ignored by Git.
+
 Run the small three-layer gradient-descent demonstration. It learns `y = 2x + 1` with batched forward passes, backpropagation, mean-squared error, and plain gradient descent:
 
 ```bash
