@@ -1,81 +1,35 @@
-"""Build chronological, whole-game train, validation, and test splits.
+"""Chronological whole-game 80/10/10 train/validation/test split.
 
-Why three sets?
-----------------
-When we train a neural network to imitate a chess player, we need three
-*different* conversations with the data:
+Three sets, each with a distinct role:
 
-- **Training set (~80%)** — the only set the network actually learns
-  from.  Gradient descent adjusts the weights to reduce the training
-  loss, so the network gets better and better at predicting *these*
-  moves.
+- Train (~80%): the only set the network learns from (gradient descent).
+- Validation (~10%): held-out games used to measure generalization and
+  guide tuning (early stopping, capacity, learning rate).
+- Test (~10%): untouched until the final, one-shot estimate of how the
+  model does on brand-new games.
 
-- **Validation set (~10%)** — a set the network never learns from
-  directly.  After each training epoch we measure how well it predicts
-  validation moves it has never been trained on.  This tells us whether
-  the network is *generalizing* (learning chess patterns) or merely
-  *memorizing* (echoing training positions).  We use it to make
-  decisions: when to stop training, how big the network should be,
-  which learning rate works best.
+Golden rule: a game the model trained on never appears in validation
+or test.
 
-- **Test set (~10%)** — a set nobody looks at until the very end.  If
-  we kept tuning against the validation set, we would slowly start
-  overfitting to the validation set too.  The test set is the final
-  exam: one last measurement of a fully finished model, used exactly
-  once, so its score is an honest estimate of how the model would do on
-  brand-new games.
+Why whole games, oldest-first?
+Splitting flat (X, y) rows row-by-row leaks moves of the same game
+across sets — consecutive moves are near-identical, so validation
+looks great while nothing transfers. Shuffling games mixes career
+eras, breaking the "predict what comes next" use case. This module
+therefore keeps one (X_i, y_i) bundle per game, sorts by Date/Time
+headers, and moves whole games: oldest 80% train, next 10% validate,
+newest 10% test.
 
-The golden rule: **a position the model learned from must never appear
-in the validation or test set.**
-
-Why split by whole games, chronologically?
-------------------------------------------
-Two traps to avoid:
-
-1. **Splitting rows, not games.**  ``dataset.build_dataset`` flattens
-   every game into rows and returns one big ``(X, y)`` pair with no
-   record of which game each row came from.  Splitting *those* arrays
-   row-by-row would put moves from the *same game* into different sets.
-   Consecutive moves in one game are extremely similar (same opening,
-   same pawn structure), so the model could almost perfectly predict a
-   "validation" move just because it trained on the moves right before
-   it.  The validation score would look great while the model learned
-   nothing transferable.  Therefore this module never touches the flat
-   arrays for splitting: :func:`build_per_game_dataset` keeps one
-   ``(X_i, y_i)`` pair **per game**, and the split moves whole games.
-
-2. **Splitting randomly.**  Even at the game level, shuffling games
-   before splitting mixes eras of the player's career across sets.  A
-   learner predicting "what will this player do *next*, after all the
-   games I have seen so far?" is best served by an honest time split:
-   train on the **oldest** 80% of games, validate on the next 10%, and
-   test on the **newest** 10%.  That mirrors how the model will be used
-   in the future and respects the fact that a player's style evolves.
-
-Game counts vs. example counts
-------------------------------
-80/10/10 applies to **whole games**.  With ``n`` games we use
-``floor`` math: the oldest ``int(0.8 * n)`` games train, the next
-``int(0.9 * n) - int(0.8 * n)`` games validate, and the rest test.
-Whole games cannot always hit the percentages exactly (e.g. 7 games
-become 5/1/1 instead of 5.6/0.7/0.7), and that is fine — correctness of
-the boundary beats exactness of the ratio.  Very small PGNs can leave
-the validation (or training) set empty; :func:`split_games` emits a
-``UserWarning`` in that case instead of failing, and every split always
-comes back as correctly shaped, correctly typed arrays — possibly with
-zero rows — following the same convention as
-:func:`chessmovenet.dataset.build_dataset`.
+Ratios apply to whole games via floor math (e.g. 7 games -> 5/1/1),
+so exact percentages aren't guaranteed; empty sets raise a
+UserWarning instead of failing.
 
 Functions
 ---------
-- :func:`build_per_game_dataset` — PGN file -> list of per-game example
-  bundles (the game-aware sibling of ``dataset.build_dataset``).
-- :func:`sort_games_chronologically` — order bundles by ``Date`` /
-  ``Time`` headers.
-- :func:`split_games` — cut an ordered list of games at the 80% and 90%
-  marks and stack each slice into ``(X, y)`` arrays.
-- :func:`split_dataset_chronologically` — the one-call convenience
-  wrapper combining all three steps.
+- build_per_game_dataset — PGN file -> per-game example bundles
+- sort_games_chronologically — order bundles by Date/Time headers
+- split_games — cut ordered games at the 80%/90% marks into (X, y) arrays
+- split_dataset_chronologically — end-to-end wrapper
 """
 
 from __future__ import annotations
@@ -150,7 +104,7 @@ def _empty_arrays() -> tuple[np.ndarray, np.ndarray]:
 def _encode_one_game(
     game: chess.pgn.Game, username: str
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Encode one game's moves while preserving its game boundary.
+    """Encode one game's moves as an ``(X, y)`` pair.
 
     This is the per-game core of ``dataset.build_dataset``: for every
     ``(fen_before_move, uci_move)`` pair that
@@ -189,7 +143,7 @@ def _encode_one_game(
 def build_per_game_dataset(
     pgn_path: str | Path, username: str
 ) -> list[GameExamples]:
-    """Read a PGN file into one :class:`GameExamples` bundle per game.
+    """Read usable games into separate example bundles.
 
     Streams the file with :func:`chessmovenet.data.read_games` (one game
     in memory at a time) and keeps games **separate** — the game-aware
@@ -238,7 +192,7 @@ def build_per_game_dataset(
 
 
 def sort_games_chronologically(games: list[GameExamples]) -> list[GameExamples]:
-    """Return ``games`` ordered oldest first, using Date and Time headers.
+    """Return games oldest-first by their ``Date`` and ``Time`` headers.
 
     The sort key is the tuple ``(date, time)`` of the PGN headers, both
     plain strings.  ``"2024.01.31"`` sorts before ``"2024.02.01"`` because
@@ -260,7 +214,7 @@ def sort_games_chronologically(games: list[GameExamples]) -> list[GameExamples]:
 
 
 def _stack(games: list[GameExamples]) -> tuple[np.ndarray, np.ndarray]:
-    """Concatenate game arrays in order, or return standard empty arrays.
+    """Concatenate game arrays in order, or return correctly shaped empties.
 
     Row ``k`` of the output ``X`` still pairs with label ``k`` of the
     output ``y``, because each game's ``X_i``/``y_i`` were built
@@ -336,7 +290,7 @@ def split_games(games: list[GameExamples]) -> DatasetSplit:
 def split_dataset_chronologically(
     pgn_path: str | Path, username: str
 ) -> DatasetSplit:
-    """Build, order, and split a player's PGN games in one call.
+    """Build a player's PGN dataset and split it chronologically.
 
     Combines the three building blocks:
 

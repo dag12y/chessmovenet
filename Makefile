@@ -1,12 +1,17 @@
 PYTHON := .venv/bin/python
 PYTHONPATH := src
+VENV_ACTIVATE := .venv/bin/activate
+SHELL := /bin/bash
 EPOCHS ?= 3
 CHECKPOINT ?= artifacts/checkpoint_latest.npz
 HISTORY ?= artifacts/history_latest.npz
 USERNAME ?=
 DATA ?= data/processed/split.npz
+OPTIMIZER ?= sgd
+ACTIVATION ?= relu
+HIDDEN_SIZES ?= 256
 
-.PHONY: help test demo download prepare train plot evaluate api web
+.PHONY: help test demo download prepare train plot evaluate api web shell activate
 
 help:
 	@printf '%s\n' \
@@ -16,11 +21,20 @@ help:
 	  '  make download                     Download public games from Chess.com' \
 	  '  make prepare USERNAME=name         Build a dataset from data/raw/name.pgn' \
 	  '  make train                        Train for 3 epochs (change with EPOCHS=15)' \
-	  '  make train EPOCHS=15              Train for 15 epochs' \
+	  '  make train EPOCHS=15 OPTIMIZER=adam ACTIVATION=tanh HIDDEN_SIZES=256,128' \
+	  '                                   Custom optimizer / activation / hidden sizes' \
 	  '  make plot                         Create loss and accuracy charts' \
 	  '  make evaluate                     Evaluate the latest checkpoint on the test set' \
 	  '  make api                          Start the FastAPI server' \
-	  '  make web                          Start the React frontend'
+	  '  make web                          Start the React frontend' \
+	  '  make shell                        Open an interactive shell with the venv activated' \
+	  '  make activate                      Print the command to activate the venv manually'
+
+activate:
+	@echo "source $(VENV_ACTIVATE) && export PYTHONPATH=$(PYTHONPATH)"
+
+shell:
+	bash --rcfile <(echo 'source $(VENV_ACTIVATE); export PYTHONPATH=$(PYTHONPATH); PS1="(chessmovenet) \u@\h:\w\$ "') -i
 
 test:
 	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m pytest tests/ -v
@@ -40,6 +54,7 @@ prepare:
 train:
 	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m chessmovenet.train \
 		--epochs $(EPOCHS) --batch-size 128 --lr 0.001 --seed 0 \
+		--optimizer $(OPTIMIZER) --activation $(ACTIVATION) --hidden-sizes $(HIDDEN_SIZES) \
 		--checkpoint $(CHECKPOINT) --history $(HISTORY)
 
 plot:
