@@ -90,6 +90,9 @@ dataset — beating that baseline meaningfully is the first real milestone.
 ```
 src/chessmovenet/   package: data, dataset, split, encode, moves, model,
                     loss, train, checkpoint
+backend/            FastAPI game API; loads the selected model checkpoint
+frontend/           React/Vite chessboard and move-history interface
+requirements-api.txt FastAPI/Uvicorn dependencies for the local game server
 tests/              pytest suite
 artifacts/          checkpoint.npz + history.npz after training
                     (generated, never committed)
@@ -97,6 +100,40 @@ data/raw/           my Chess.com PGN (read-only, never committed)
 data/processed/     split.npz — train/val/test arrays (generated, never committed)
 reports/            preparation report (generated, never committed)
 progress.md         running summary of the project
+```
+
+## Play against the model
+
+The local web app uses the six-epoch Adam checkpoint by default. The FastAPI
+server validates human moves with python-chess and has ChessMoveNet choose the
+highest-scoring legal reply. Games are stored in server memory while it runs.
+
+Install the API and frontend dependencies once:
+
+```bash
+.venv/bin/pip install -r requirements-api.txt
+cd frontend && npm install
+```
+
+Start the API from the repository root in one terminal:
+
+```bash
+PYTHONPATH=src .venv/bin/uvicorn backend.app:app --reload
+```
+
+Start Vite in another terminal:
+
+```bash
+cd frontend && npm run dev
+```
+
+Open `http://127.0.0.1:5173`, start a game, and play White. The default model
+checkpoint is `artifacts/checkpoint_adam_ep6.npz`; to use another checkpoint,
+set `CHESSMOVENET_CHECKPOINT` before starting Uvicorn. For example:
+
+```bash
+CHESSMOVENET_CHECKPOINT=artifacts/checkpoint_adam_256_128_ep6.npz \
+  PYTHONPATH=src .venv/bin/uvicorn backend.app:app --reload
 ```
 
 ## Commands
