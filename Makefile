@@ -11,7 +11,7 @@ OPTIMIZER ?= sgd
 ACTIVATION ?= relu
 HIDDEN_SIZES ?= 256
 
-.PHONY: help test demo download prepare train plot evaluate api web shell activate
+.PHONY: help test demo download prepare train plot evaluate api web play shell activate
 
 help:
 	@printf '%s\n' \
@@ -27,6 +27,7 @@ help:
 	  '  make evaluate                     Evaluate the latest checkpoint on the test set' \
 	  '  make api                          Start the FastAPI server' \
 	  '  make web                          Start the React frontend' \
+	  '  make play                         Start API + frontend to play vs the model' \
 	  '  make shell                        Open an interactive shell with the venv activated' \
 	  '  make activate                      Print the command to activate the venv manually'
 
@@ -69,3 +70,15 @@ api:
 
 web:
 	cd frontend && npm run dev
+
+# Play against the model: starts the API (best Adam Tanh checkpoint) and the
+# frontend together. Override the checkpoint with: make play PLAY_CHECKPOINT=...
+PLAY_CHECKPOINT ?= artifacts/ckpt_adam_tanh_256.npz
+
+play:
+	@echo "Starting ChessMoveNet API with checkpoint $(PLAY_CHECKPOINT)..."
+	CHESSMOVENET_CHECKPOINT=$(PLAY_CHECKPOINT) PYTHONPATH=$(PYTHONPATH) .venv/bin/uvicorn backend.app:app --reload > /tmp/chessmovenet-api.log 2>&1 & \
+	echo $$! > /tmp/chessmovenet-api.pid; \
+	cd frontend && npm run dev; \
+	kill $$(cat /tmp/chessmovenet-api.pid) 2>/dev/null || true
+	@echo "API log: /tmp/chessmovenet-api.log"
