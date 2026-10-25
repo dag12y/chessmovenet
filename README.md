@@ -1,6 +1,6 @@
 # ChessMoveNet
 
-ChessMoveNet is a chess move-prediction neural network built **from scratch with NumPy**. Given a chess position, it learns to predict the move a player is likely to make. No PyTorch, TensorFlow, or autograd is used: the forward pass, loss, backpropagation, and parameter updates are implemented explicitly.
+ChessMoveNet is a chess move-prediction neural network built with **PyTorch**. Given a chess position, it learns to predict the move a player is likely to make. The forward pass, loss, backpropagation, and parameter updates are handled by PyTorch autograd, and training runs on CPU or NVIDIA CUDA GPU.
 
 The repository also contains a FastAPI backend and React/Vite interface for playing against a trained checkpoint locally.
 
@@ -20,24 +20,23 @@ The default classifier architecture is:
 | --- | --- |
 | Input | 781 `float32` features: 12 piece planes (768 values), side to move, castling rights, and en-passant file |
 | Output | 4,272 move classes: 4,096 from/to combinations plus 176 promotion moves |
-| Forward pass | Vectorized dense layers using `X @ W + b`, activation, and optional softmax |
-| Loss | Numerically stable multiclass cross-entropy using log-sum-exp |
-| Learning | Manual backpropagation with mini-batch SGD; Adam is also available |
+| Forward pass | PyTorch dense layers with autograd; runs on CPU or CUDA |
+| Loss | Numerically stable multiclass cross-entropy (`F.cross_entropy`) |
+| Learning | Mini-batch SGD or Adam via PyTorch optimizers |
 | Data split | Chronological 80% / 10% / 10% train/validation/test split by complete game |
-| Verification | Central finite-difference gradient checking, safe `.npz` checkpoints, and automated tests |
+| Verification | Automated tests, safe `.pt` checkpoints with `weights_only` loading |
 
 ## Neural-network math
 
-For a mini-batch `X`, the network computes:
+For a mini-batch `X`, the network computes (via PyTorch `nn.Linear` layers):
 
 ```text
 Z₁ = XW₁ + b₁
 A₁ = ReLU(Z₁)
 logits = A₁W₂ + b₂
-probabilities = softmax(logits)
 ```
 
-Cross-entropy measures the probability given to the move that was actually played. Backpropagation uses the chain rule to calculate how every weight and bias affected that error. Gradient descent then updates every parameter:
+Cross-entropy measures the probability given to the move that was actually played. PyTorch autograd computes gradients via backpropagation, and the optimizer updates every parameter:
 
 ```text
 parameter ← parameter − learning_rate × gradient
@@ -72,6 +71,12 @@ Create a virtual environment and install the Python dependencies:
 ```bash
 python -m venv .venv
 .venv/bin/pip install -r requirements-api.txt pytest
+```
+
+On the machine with the NVIDIA GPU, install the CUDA build of PyTorch instead:
+
+```bash
+.venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cu124
 ```
 
 Run the test suite from the repository root:
@@ -210,4 +215,4 @@ Open the local Vite URL (normally `http://127.0.0.1:5173`). You play White; the 
 
 ## Technologies
 
-Python, NumPy, python-chess, FastAPI, Uvicorn, React, Vite, and pytest.
+Python, PyTorch, NumPy, python-chess, FastAPI, Uvicorn, React, Vite, and pytest.

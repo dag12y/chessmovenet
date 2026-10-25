@@ -153,6 +153,7 @@ def build_per_game_dataset(
     Skipped silently:
 
     - games where ``username`` is not one of the two players;
+    - Chess.com variants (3-check, Chess960, Crazyhouse, ...);
     - games with zero moves by the player (e.g. an aborted game record),
       because an empty game would distort the 80/10/10 *game* counts
       without adding any data.

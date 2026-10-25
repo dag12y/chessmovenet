@@ -1,8 +1,14 @@
-"""NumPy feed-forward classifier that scores chess move classes."""
+"""PyTorch feed-forward classifier that scores chess move classes."""
 
 from __future__ import annotations
 
+import re
+from typing import Callable
+
 import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 from chessmovenet.encode import BOARD_FEATURE_SIZE
 from chessmovenet.moves import OUTPUT_SIZE
@@ -11,34 +17,19 @@ from chessmovenet.moves import OUTPUT_SIZE
 INPUT_SIZE = BOARD_FEATURE_SIZE  # 781 features per encoded position
 HIDDEN_SIZE = 256  # neurons in the single hidden layer
 
-# Parameter order used by training and checkpointing.
+# Parameter order used by training and checkpointing for the default net.
 PARAMETER_NAMES = ("W1", "b1", "W2", "b2")
+
+_PARAM_NAME = re.compile(r"^([Wb])([1-9][0-9]*)$")
 
 
 def relu(z: np.ndarray) -> np.ndarray:
-    """Rectified linear unit: ``max(0, z)``, applied element-wise.
-
-    The activation function of the hidden layer.  Negative pre-activations
-    become ``0.0``; zero and positive values pass through unchanged.
-
-    Args:
-        z: Any array of pre-activation values, any shape.
-
-    Returns:
-        An array of the **same shape** as ``z`` with every negative
-        value replaced by ``0.0``.
-    """
+    """Rectified linear unit: ``max(0, z)``, applied element-wise."""
     return np.maximum(z, 0)
 
 
 def sigmoid(z: np.ndarray) -> np.ndarray:
-    """Numerically stable logistic sigmoid, applied element-wise.
-
-    ``sigmoid(z) = 1 / (1 + exp(-z))`` maps every finite real number to
-    ``(0, 1)``.  Splitting positive and negative inputs avoids overflow for
-    very negative values, where the direct formula would calculate ``exp`` of
-    a large positive number.
-    """
+    """Numerically stable logistic sigmoid, applied element-wise."""
     z = np.asarray(z)
     result = np.empty_like(z, dtype=np.result_type(z, np.float32))
     positive = z >= 0
@@ -54,55 +45,62 @@ def tanh(z: np.ndarray) -> np.ndarray:
 
 
 def softmax(logits: np.ndarray) -> np.ndarray:
-    """Numerically stable softmax along the last axis.
-
-    Converts raw scores (logits) into probabilities: every output lies
-    in ``(0, 1)`` and the values along the last axis sum to 1.
-
-    Why "stable"?  A naive ``exp(z) / sum(exp(z))`` overflows float32
-    for logits much larger than ~88: ``exp(1000)`` is ``inf`` and
-    ``inf / inf`` is ``NaN``.  Subtracting the maximum logit of each row
-    first changes nothing mathematically — for any constant ``c``,
-    ``exp(z - c) / sum(exp(z - c))`` equals ``exp(z) / sum(exp(z))`` —
-    but the largest exponent in each row becomes ``exp(0) = 1`` instead
-    of something enormous.
-
-    Args:
-        logits: A 1-D array of shape ``(C,)`` or a 2-D batch of shape
-            ``(N, C)`` of raw scores.
-
-    Returns:
-        An array of the same shape, holding probabilities along the
-        last axis (each row sums to ``1.0``), dtype float32 for
-        float32 input.
-    """
-    # Subtract the row maximum for numerical stability.
+    """Numerically stable softmax along the last axis."""
     shifted = logits - np.max(logits, axis=-1, keepdims=True)
     exp_values = np.exp(shifted)
     return exp_values / np.sum(exp_values, axis=-1, keepdims=True)
 
 
-class ChessMoveNet:
-    """Fully connected classifier with configurable hidden layer widths.
+class _ParamArray(np.ndarray):
+    """NumPy view of a PyTorch parameter that writes mutations back."""
 
-    The numbered weight and bias arrays are plain, public NumPy attributes so
-    training and checkpoint code can read and adjust them directly. The
-    default model has ``W1``,
-    ``b1``, ``W2``, and ``b2``; deeper models add matching numbered arrays.
+    def __new__(cls, array: np.ndarray, writeback: Callable[[np.ndarray], None]):
+        obj = np.array(array, copy=True).view(cls)
+        obj._writeback = writeback
+        return obj
 
-    Attributes:
-        input_size: Features per position (default 781).
-        hidden_size: Hidden neurons (default 256).
-        output_size: Move classes (default 4272).
-        W1: First hidden-layer weights, shape ``(input_size, hidden_size)`` =
-            ``(781, 256)``, float32, He-initialized.
-        b1: Hidden-layer biases, shape ``(hidden_size,)`` = ``(256,)``,
-            float32, zeros.
-        W2: Output weights for the default single-hidden-layer model, shape
-            ``(hidden_size, output_size)``
-            = ``(256, 4272)``, float32, He-initialized.
-        b2: Output-layer biases, shape ``(output_size,)`` = ``(4272,)``,
-            float32, zeros.
+    def __array_finalize__(self, obj) -> None:
+        if obj is None:
+            return
+        self._writeback = getattr(obj, "_writeback", None)
+
+    def copy(self, order="C"):  # noqa: ANN001
+        return np.array(self, copy=True, order=order)
+
+    def astype(self, dtype, order="K", casting="unsafe", subok=True, copy=True):
+        return np.ndarray.astype(
+            np.asarray(self), dtype, order=order, casting=casting, subok=False, copy=copy
+        )
+
+    def __setitem__(self, key, value) -> None:
+        np.ndarray.__setitem__(self, key, value)
+        if self._writeback is not None:
+            self._writeback(np.asarray(self))
+
+    def __isub__(self, other):
+        np.ndarray.__isub__(self, other)
+        if self._writeback is not None:
+            self._writeback(np.asarray(self))
+        return self
+
+    def __iadd__(self, other):
+        np.ndarray.__iadd__(self, other)
+        if self._writeback is not None:
+            self._writeback(np.asarray(self))
+        return self
+
+    def __imul__(self, other):
+        np.ndarray.__imul__(self, other)
+        if self._writeback is not None:
+            self._writeback(np.asarray(self))
+        return self
+
+
+class ChessMoveNet(nn.Module):
+    """Fully connected move classifier implemented with PyTorch autograd.
+
+    Dense layers live on CPU or CUDA. Tests and the play backend still see the
+    NumPy layout ``W`` shape ``(in, out)`` used by the original from-scratch net.
     """
 
     def __init__(
@@ -113,28 +111,9 @@ class ChessMoveNet:
         seed: int | None = None,
         activation: str = "relu",
         hidden_sizes: tuple[int, ...] | list[int] | None = None,
+        device: torch.device | str | None = None,
     ) -> None:
-        """Create the network and initialize its parameters.
-
-        Args:
-            input_size: Number of input features per position.
-            hidden_size: Number of neurons in the single hidden layer. Kept as
-                a convenient shorthand and for compatibility with older calls.
-            output_size: Number of output move classes.
-            seed: Optional integer seed for reproducible weights.  The
-                same seed always produces the same initial weights;
-                ``None`` gives fresh random weights each time.
-            activation: Hidden-layer activation: ``"relu"`` (default),
-                ``"sigmoid"``, or ``"tanh"``.
-            hidden_sizes: Optional widths for one or more hidden layers, e.g.
-                ``(128, 64)``. If supplied, this takes precedence over
-                ``hidden_size``.
-
-        Raises:
-            TypeError: If a size is not an integer.
-            ValueError: If a size is less than 1.
-        """
-        # Validate layer sizes.
+        super().__init__()
         if hidden_sizes is None:
             hidden_sizes = (hidden_size,)
         elif not isinstance(hidden_sizes, (tuple, list)) or not hidden_sizes:
@@ -183,42 +162,99 @@ class ChessMoveNet:
                 f"got {activation!r}"
             )
 
-        # A local RNG keeps initialization reproducible without global state.
-        rng = np.random.default_rng(seed)
+        layers: list[nn.Linear] = []
+        for fan_in, fan_out in zip(self.layer_sizes[:-1], self.layer_sizes[1:]):
+            layers.append(nn.Linear(fan_in, fan_out, bias=True))
+        self.layers = nn.ModuleList(layers)
+        self._init_parameters(seed)
+        if device is not None:
+            self.to(device)
 
-        # He initialization for ReLU; keep weights in float32.
-        for layer, (fan_in, fan_out) in enumerate(
-            zip(self.layer_sizes[:-1], self.layer_sizes[1:]), start=1
-        ):
-            scale = np.sqrt(
-                (2.0 if self.activation == "relu" else 1.0) / fan_in
+    def _init_parameters(self, seed: int | None) -> None:
+        if seed is not None:
+            torch.manual_seed(int(seed))
+        for layer in self.layers:
+            fan_in = layer.weight.size(1)
+            std = float(np.sqrt((2.0 if self.activation == "relu" else 1.0) / fan_in))
+            nn.init.normal_(layer.weight, mean=0.0, std=std)
+            nn.init.zeros_(layer.bias)
+
+    def _parse_param_name(self, name: str) -> tuple[str, int] | None:
+        match = _PARAM_NAME.fullmatch(name)
+        if match is None:
+            return None
+        kind, index = match.group(1), int(match.group(2))
+        if index > len(self.layers):
+            return None
+        return kind, index
+
+    def _numpy_param(self, kind: str, index: int) -> np.ndarray:
+        layer = self.layers[index - 1]
+        if kind == "W":
+            return layer.weight.detach().T.contiguous().cpu().numpy()
+        return layer.bias.detach().contiguous().cpu().numpy()
+
+    def _write_numpy_param(self, kind: str, index: int, value: np.ndarray) -> None:
+        array = np.asarray(value)
+        layer = self.layers[index - 1]
+        if array.dtype == np.float64 and layer.weight.dtype != torch.float64:
+            self.double()
+            layer = self.layers[index - 1]
+        elif array.dtype == np.float32 and layer.weight.dtype == torch.float64:
+            self.float()
+            layer = self.layers[index - 1]
+        tensor = torch.as_tensor(array, device=layer.weight.device)
+        with torch.no_grad():
+            if kind == "W":
+                if tensor.ndim != 2:
+                    raise ValueError(f"W{index} must be 2-D, got {tensor.ndim}-D")
+                layer.weight.copy_(tensor.T.contiguous().to(dtype=layer.weight.dtype))
+            else:
+                layer.bias.copy_(tensor.to(dtype=layer.bias.dtype))
+
+    def _module_layers(self):
+        modules = self.__dict__.get("_modules") or {}
+        return modules.get("layers")
+
+    def __getattr__(self, name: str):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            layers = self._module_layers()
+            match = _PARAM_NAME.fullmatch(name) if layers is not None else None
+            if match is None:
+                raise
+            kind, index = match.group(1), int(match.group(2))
+            if not 1 <= index <= len(layers):
+                raise
+            return _ParamArray(
+                self._numpy_param(kind, index),
+                lambda array, k=kind, i=index: self._write_numpy_param(k, i, array),
             )
-            weight = rng.normal(0.0, scale, size=(fan_in, fan_out)).astype(
-                np.float32
-            )
-            bias = np.zeros(fan_out, dtype=np.float32)
-            setattr(self, f"W{layer}", weight)
-            setattr(self, f"b{layer}", bias)
+
+    def __setattr__(self, name: str, value) -> None:
+        layers = self._module_layers() if "_modules" in self.__dict__ else None
+        if layers is not None:
+            match = _PARAM_NAME.fullmatch(name)
+            if match is not None:
+                kind, index = match.group(1), int(match.group(2))
+                if 1 <= index <= len(layers):
+                    self._write_numpy_param(kind, index, np.asarray(value))
+                    return
+        super().__setattr__(name, value)
+
+    @property
+    def device(self) -> torch.device:
+        return self.layers[0].weight.device
+
+    def _activate(self, z: torch.Tensor) -> torch.Tensor:
+        if self.activation == "relu":
+            return F.relu(z)
+        if self.activation == "sigmoid":
+            return torch.sigmoid(z)
+        return torch.tanh(z)
 
     def _check_input(self, X: np.ndarray) -> np.ndarray:
-        """Convert ``X`` to float32 and validate its shape.
-
-        Accepts a single board vector of shape ``(input_size,)`` or a
-        batch of shape ``(N, input_size)``; nested Python lists of the
-        same shapes work too (they are converted to arrays).
-
-        Args:
-            X: The candidate input.
-
-        Returns:
-            ``X`` as a float32 NumPy array, 1-D or 2-D.
-
-        Raises:
-            TypeError: If ``X`` cannot be converted to a numeric array.
-            ValueError: If ``X`` has the wrong number of dimensions or
-                the wrong feature count in its last axis, contains no
-                rows, or contains NaN / infinite values.
-        """
         try:
             X = np.asarray(X, dtype=np.float32)
         except (TypeError, ValueError) as exc:
@@ -240,129 +276,54 @@ class ChessMoveNet:
                 f"{X.shape[-1]}"
             )
         if X.ndim == 2 and X.shape[0] == 0:
-            # Reject empty batches early.
             raise ValueError("X must contain at least one position")
         n_bad = int(X.size - np.count_nonzero(np.isfinite(X)))
         if n_bad:
-            # Reject invalid feature values.
             raise ValueError(
                 f"X must be finite (no NaN or infinity), but "
                 f"{n_bad} feature value(s) are not"
             )
         return X
 
-    def forward(
-        self, X: np.ndarray, apply_softmax: bool = False
-    ) -> np.ndarray:
-        """Run the network on one board vector or a batch of them.
-
-        The full computation, with shapes for a batch of size ``N``
-        (a single input is treated as ``N = 1`` internally):
-
-        1. ``Z1 = X @ W1 + b1``      -> ``(N, 256)`` — hidden linear layer.
-        2. ``A1 = relu(Z1)``         -> ``(N, 256)`` — negative evidence off.
-        3. ``logits = A1 @ W2 + b2`` -> ``(N, 4272)`` — one raw score per
-           move class.
-        4. Optionally ``softmax(logits)`` -> probabilities.
-
-        Args:
-            X: Board features of shape ``(781,)`` (single position) or
-                ``(N, 781)`` (batch), e.g. rows of ``encode_board`` or
-                ``DatasetSplit.X_train``.
-            apply_softmax: When True, return probabilities instead of
-                raw logits (see the module docstring for the difference).
-
-        Returns:
-            A float32 array of shape ``(4272,)`` for a single input or
-            ``(N, 4272)`` for a batch — logits by default, probabilities
-            when ``apply_softmax=True``.  **No legality filtering is
-            done**: every class gets a score, including moves that
-            cannot be played in this position.
-
-        The arithmetic itself lives in :meth:`_forward_with_cache` so
-        that :meth:`backward` reuses exactly the same calculations.
-        """
-        _, _, logits, single = self._forward_with_cache(X)
-
-        output = softmax(logits) if apply_softmax else logits
-
-        # "One vector in -> one vector out": drop the batch axis.
-        return output[0] if single else output
-
-    def _forward_with_cache(
-        self, X: np.ndarray
-    ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, bool]:
-        """Run the forward pass, keeping every intermediate value.
-
-        This is the single place where the network's arithmetic lives;
-        :meth:`forward` and :meth:`backward` both call it, so the
-        forward calculation used for predictions is *exactly* the one
-        used to produce gradients.
-
-        Args:
-            X: Board features of shape ``(781,)`` or ``(N, 781)``.
-
-        Returns:
-            ``(X2d, activations, logits, single)``. Activations includes
-            the input followed by every hidden-layer output; ``single`` says
-            whether the caller passed one position.
-        """
+    def _as_tensor(self, X: np.ndarray) -> tuple[torch.Tensor, bool]:
         X = self._check_input(X)
         single = X.ndim == 1
         if single:
-            X = X[np.newaxis, :]  # (781,) -> (1, 781): treat as batch of 1
-
-        activations = [X]
-        for layer in range(1, len(self.layer_sizes) - 1):
-            z = activations[-1] @ getattr(self, f"W{layer}") + getattr(
-                self, f"b{layer}"
-            )
-            activations.append(self._activate(z))
-        output_layer = len(self.layer_sizes) - 1
-        logits = activations[-1] @ getattr(self, f"W{output_layer}") + getattr(
-            self, f"b{output_layer}"
+            X = X[np.newaxis, :]
+        tensor = torch.from_numpy(np.ascontiguousarray(X)).to(
+            device=self.device, dtype=self.layers[0].weight.dtype
         )
-        return X, activations, logits, single
+        return tensor, single
 
-    def _activate(self, z: np.ndarray) -> np.ndarray:
-        """Apply this network's configured hidden-layer activation."""
-        if self.activation == "relu":
-            return relu(z)
-        if self.activation == "sigmoid":
-            return sigmoid(z)
-        return tanh(z)
+    def forward_tensor(self, X: torch.Tensor) -> torch.Tensor:
+        """Batched logits from a feature tensor already on this module's device."""
+        hidden = X
+        for layer in self.layers[:-1]:
+            hidden = self._activate(layer(hidden))
+        return self.layers[-1](hidden)
 
-    def _activation_derivative(
-        self, z: np.ndarray, activated: np.ndarray
-    ) -> np.ndarray:
-        """Derivative of the configured activation, evaluated at ``z``."""
-        if self.activation == "relu":
-            return (z > 0).astype(activated.dtype)
-        if self.activation == "sigmoid":
-            return activated * (1.0 - activated)
-        return 1.0 - np.square(activated)
+    def forward(self, X, apply_softmax: bool = False):
+        """NumPy-friendly forward used by tests, evaluation, and the play API.
+
+        Accepts a board vector ``(input_size,)`` or a batch ``(N, input_size)``.
+        Returns logits by default, or probabilities when ``apply_softmax=True``.
+        """
+        if isinstance(X, torch.Tensor):
+            logits = self.forward_tensor(X)
+            if apply_softmax:
+                logits = torch.softmax(logits, dim=-1)
+            return logits
+
+        tensor, single = self._as_tensor(X)
+        logits = self.forward_tensor(tensor)
+        if apply_softmax:
+            logits = torch.softmax(logits, dim=-1)
+        output = logits.detach().cpu().numpy()
+        return output[0] if single else output
 
     def _check_labels(self, labels: np.ndarray, n: int) -> np.ndarray:
-        """Validate class labels against a batch of size ``n``.
-
-        A bare Python/NumPy integer is accepted as shorthand for a
-        batch of one — mirroring how :meth:`forward` accepts a single
-        position.
-
-        Args:
-            labels: Candidate labels (scalar or 1-D).
-            n: Number of examples in the batch.
-
-        Returns:
-            A 1-D int64 array of shape ``(n,)``.
-
-        Raises:
-            TypeError: If the labels are not integers.
-            ValueError: If the shape does not match the batch or a
-                label falls outside ``0 .. output_size - 1``.
-        """
         labels = np.asarray(labels)
-        if labels.ndim == 0:  # scalar label -> batch of one
+        if labels.ndim == 0:
             labels = labels.reshape(1)
 
         if labels.ndim != 1:
@@ -387,106 +348,30 @@ class ChessMoveNet:
             )
         return labels
 
-    def backward(
-        self, X: np.ndarray, labels: np.ndarray
-    ) -> dict[str, np.ndarray]:
-        """Compute loss gradients for W1, b1, W2, and b2 (no updates).
+    def backward(self, X: np.ndarray, labels: np.ndarray) -> dict[str, np.ndarray]:
+        """Mean cross-entropy gradients via autograd, as NumPy arrays."""
+        tensor, _single = self._as_tensor(X)
+        labels = self._check_labels(labels, tensor.shape[0])
+        label_tensor = torch.from_numpy(labels).to(device=self.device)
 
-        What it computes
-        ----------------
-        The mean cross-entropy loss of this batch (see
-        :mod:`chessmovenet.loss`) has, with respect to the logits, the
-        classic softmax + cross-entropy gradient:
+        self.zero_grad(set_to_none=True)
+        logits = self.forward_tensor(tensor)
+        loss = F.cross_entropy(logits, label_tensor, reduction="mean")
+        loss.backward()
 
-        ``dL/dlogits = (softmax(logits) - one_hot(labels)) / N``
-
-        — "how much each predicted probability overshoots the truth",
-        averaged over the batch.  The chain rule then walks that signal
-        backward through each layer:
-
-        ========  ==========================  =====================
-        Step      Array (shape)              Formula
-        ========  ==========================  =====================
-        1         ``dlogits`` (N, 4272)      ``(P - Y) / N``
-        2         ``dW2`` (256, 4272)         ``A1.T @ dlogits``
-        2         ``db2`` (4272,)             ``dlogits.sum(axis=0)``
-        3         ``dA1`` (N, 256)            ``dlogits @ W2.T``
-        4         ``dZ1`` (N, 256)            ``dA1 * (Z1 > 0)``
-        5         ``dW1`` (781, 256)          ``X.T @ dZ1``
-        5         ``db1`` (256,)              ``dZ1.sum(axis=0)``
-        ========  ==========================  =====================
-
-        (``P`` = softmax probabilities, ``Y`` = one-hot labels, ``N`` =
-        batch size, ``Z1``/``A1`` = hidden pre-/post-ReLU values.)
-
-        Args:
-            X: Board features of shape ``(781,)`` or ``(N, 781)``
-                (validated exactly as by :meth:`forward`).
-            labels: Integer move classes: a bare integer for a single
-                input, or shape ``(N,)`` for a batch; each value in
-                ``0 .. output_size - 1``.
-
-        Returns:
-            A dict ``{"W1", "b1", "W2", "b2"}`` — one gradient array
-            per parameter, **same shapes as the parameters themselves**,
-            averaged over the batch (gradients of the *mean* loss).
-            The parameters are **not** modified; applying gradients is
-            a later step (training).
-
-        Raises:
-            TypeError: If ``labels`` are not integers.
-            ValueError: If ``X`` or ``labels`` have invalid shapes, or
-                a label is outside ``0 .. output_size - 1``.
-        """
-        X2d, activations, logits, _single = self._forward_with_cache(X)
-        labels = self._check_labels(labels, X2d.shape[0])
-        n = X2d.shape[0]
-
-        # Softmax-cross-entropy gradient: (P - Y) / N.
-        P = softmax(logits)  # (N, 4272) predicted probabilities
-        dlogits = P.copy()  # (N, 4272)
-        dlogits[np.arange(n), labels] -= 1.0
-        dlogits /= n  # mean over the batch
-
-        # Backpropagate through each dense layer.
         gradients: dict[str, np.ndarray] = {}
-        output_layer = len(self.layer_sizes) - 1
-        d_activation = dlogits
-        for layer in range(output_layer, 0, -1):
-            previous_activation = activations[layer - 1]
-            gradients[f"W{layer}"] = previous_activation.T @ d_activation
-            gradients[f"b{layer}"] = d_activation.sum(axis=0)
-            d_previous = d_activation @ getattr(self, f"W{layer}").T
-            if layer > 1:
-                # Rebuild the pre-activation for its derivative.
-                previous_z = activations[layer - 2] @ getattr(
-                    self, f"W{layer - 1}"
-                ) + getattr(self, f"b{layer - 1}")
-                d_activation = d_previous * self._activation_derivative(
-                    previous_z, previous_activation
-                )
-
+        for index, layer in enumerate(self.layers, start=1):
+            if layer.weight.grad is None or layer.bias.grad is None:
+                raise RuntimeError(f"missing gradient for layer {index}")
+            gradients[f"W{index}"] = (
+                layer.weight.grad.detach().T.contiguous().cpu().numpy()
+            )
+            gradients[f"b{index}"] = layer.bias.grad.detach().contiguous().cpu().numpy()
         return gradients
 
     def predict(self, X: np.ndarray):
-        """Return the most probable move class and its probability.
-
-        The predicted class is the index of the largest probability
-        (``argmax``); since softmax never changes the ordering of the
-        logits, it is also the index of the largest logit.  Note this
-        is the network's *opinion*, not a legal-move check: the argmax
-        may well be an illegal move in the given position.
-
-        Args:
-            X: Board features of shape ``(781,)`` or ``(N, 781)``.
-
-        Returns:
-            For a single input: ``(label, probability)`` as a Python
-            ``int`` and ``float``.  For a batch: ``(labels, probs)``,
-            two float/int NumPy arrays of shape ``(N,)`` — the best
-            class and its probability for each row.
-        """
-        probabilities = self.forward(X, apply_softmax=True)  # (N, 4272)
+        """Return the most probable move class and its probability."""
+        probabilities = self.forward(X, apply_softmax=True)
         labels = np.argmax(probabilities, axis=-1)
         confidences = np.max(probabilities, axis=-1)
         if probabilities.ndim == 1:
@@ -494,26 +379,7 @@ class ChessMoveNet:
         return labels, confidences
 
     def predict_top_k(self, X: np.ndarray, k: int = 5):
-        """Return the ``k`` most probable move classes, best first.
-
-        Like :meth:`predict`, this performs **no legality filtering**:
-        the top classes are simply the largest probabilities over all
-        ``output_size`` classes.
-
-        Args:
-            X: Board features of shape ``(781,)`` or ``(N, 781)``.
-            k: How many top classes to return; must satisfy
-                ``1 <= k <= output_size``.
-
-        Returns:
-            A ``(labels, probs)`` pair.  For a single input both arrays
-            have shape ``(k,)``; for a batch, shape ``(N, k)``.  Each
-            row is sorted by probability, highest first.
-
-        Raises:
-            TypeError: If ``k`` is not an integer.
-            ValueError: If ``k`` is outside ``1 .. output_size``.
-        """
+        """Return the ``k`` most probable move classes, best first."""
         if isinstance(k, bool) or not isinstance(k, (int, np.integer)):
             raise TypeError(f"expected an integer k, got {type(k).__name__}")
         k = int(k)
@@ -523,20 +389,15 @@ class ChessMoveNet:
                 f"of move classes), got {k}"
             )
 
-        probabilities = self.forward(X, apply_softmax=True)  # (N, 4272)
+        probabilities = self.forward(X, apply_softmax=True)
         single = probabilities.ndim == 1
         if single:
-            probabilities = probabilities[np.newaxis, :]  # -> (1, 4272)
+            probabilities = probabilities[np.newaxis, :]
 
-        # Sort highest probabilities first.
-        order = np.argsort(probabilities, axis=-1)  # (N, 4272)
-        top_labels = order[:, -k:][:, ::-1]  # (N, k), best class first
-        top_probs = np.take_along_axis(
-            probabilities, top_labels, axis=-1
-        )  # (N, k), matching probabilities
+        order = np.argsort(probabilities, axis=-1)
+        top_labels = order[:, -k:][:, ::-1]
+        top_probs = np.take_along_axis(probabilities, top_labels, axis=-1)
 
         if single:
-            return top_labels[0], top_probs[0]  # (k,) each
+            return top_labels[0], top_probs[0]
         return top_labels, top_probs
-
-

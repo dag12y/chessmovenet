@@ -19,7 +19,7 @@ from chessmovenet.model import ChessMoveNet
 from chessmovenet.moves import move_to_label
 
 
-DEFAULT_CHECKPOINT = Path("artifacts/checkpoint_adam_ep6.npz")
+DEFAULT_CHECKPOINT = Path("artifacts/checkpoint_latest.pt")
 CHECKPOINT_PATH = Path(os.environ.get("CHESSMOVENET_CHECKPOINT", DEFAULT_CHECKPOINT))
 
 
@@ -30,7 +30,7 @@ def load_model(path: Path) -> ChessMoveNet:
             f"Model checkpoint not found: {path}. Train a model first or set "
             "CHESSMOVENET_CHECKPOINT to a checkpoint path."
         )
-    model = load_checkpoint(path)
+    model = load_checkpoint(path, map_location="cpu")
     if model.input_size != 781 or model.output_size != 4272:
         raise RuntimeError(
             f"Checkpoint has incompatible dimensions: {model.input_size} inputs, "

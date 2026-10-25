@@ -26,6 +26,25 @@ def read_games(path: str | Path) -> Iterator[chess.pgn.Game]:
             yield game
 
 
+# Chess.com labels standard games with no Variant header. Anything else
+# (3-check, Chess960, Crazyhouse, ...) uses a different FEN dialect.
+_STANDARD_VARIANTS = {"", "standard", "chess"}
+
+
+def is_standard_chess(game: chess.pgn.Game) -> bool:
+    """Return whether ``game`` is standard chess, not a Chess.com variant.
+
+    Args:
+        game: A parsed PGN game.
+
+    Returns:
+        ``True`` when the ``Variant`` header is missing or names standard
+        chess; ``False`` for 3-check, Chess960, Crazyhouse, and similar.
+    """
+    variant = game.headers.get("Variant", "").strip().lower()
+    return variant in _STANDARD_VARIANTS
+
+
 def my_color(game: chess.pgn.Game, username: str) -> bool | None:
     """Return the player's color, or ``None`` if they are absent.
 
@@ -64,6 +83,9 @@ def extract_examples(
         moves in chronological order. Empty if the username is not a player
         in this game.
     """
+    if not is_standard_chess(game):
+        return []
+
     color = my_color(game, username)
     if color is None:
         return []

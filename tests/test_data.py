@@ -12,7 +12,12 @@ import io
 import chess
 import chess.pgn
 
-from chessmovenet.data import extract_examples, my_color, read_games
+from chessmovenet.data import (
+    extract_examples,
+    is_standard_chess,
+    my_color,
+    read_games,
+)
 
 # A complete two-game PGN document, as two Chess.com-style games.
 TWO_GAME_PGN = """\
@@ -177,6 +182,57 @@ def test_extract_examples_returns_empty_list_for_non_player() -> None:
     game = parse_single_game(SINGLE_GAME_PGN)
 
     assert extract_examples(game, "someone-else") == []
+
+
+def test_is_standard_chess_rejects_chess_com_variants() -> None:
+    """3-check and Chess960 headers are not standard chess."""
+    three_check = parse_single_game(
+        """\
+[Event "Live Chess - Three-Check"]
+[White "dag12yi"]
+[Black "OpponentOne"]
+[Variant "3-check"]
+[SetUp "1"]
+[FEN "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 +0+0"]
+[Result "*"]
+
+1. e4 e5 *
+"""
+    )
+    chess960 = parse_single_game(
+        """\
+[Event "Live Chess - Chess960"]
+[White "dag12yi"]
+[Black "OpponentOne"]
+[Variant "Chess960"]
+[Result "*"]
+
+1. e4 e5 *
+"""
+    )
+
+    assert is_standard_chess(parse_single_game(SINGLE_GAME_PGN))
+    assert not is_standard_chess(three_check)
+    assert not is_standard_chess(chess960)
+
+
+def test_extract_examples_skips_three_check_variant() -> None:
+    """Chess.com 3-check FENs must not be replayed as standard chess."""
+    game = parse_single_game(
+        """\
+[Event "Live Chess - Three-Check"]
+[White "dag12yi"]
+[Black "OpponentOne"]
+[Variant "3-check"]
+[SetUp "1"]
+[FEN "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 +0+0"]
+[Result "*"]
+
+1. e4 e5 *
+"""
+    )
+
+    assert extract_examples(game, "dag12yi") == []
 
 
 def test_extract_examples_fen_is_captured_before_each_move() -> None:

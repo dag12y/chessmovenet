@@ -1,6 +1,6 @@
 """Analyze and plot all 8 ChessMoveNet training combinations.
 
-Reads every ``hist_*.npz`` (and matching ``ckpt_*.npz``) in ``artifacts/``,
+Reads every ``hist_*.npz`` (and matching ``ckpt_*.pt``) in ``artifacts/``,
 compares the runs, evaluates each checkpoint on the held-out test split, and
 writes a summary CSV/Markdown report plus comparison graphs to ``reports/``.
 
@@ -73,7 +73,7 @@ def parse_combo(history_path: Path) -> dict:
         "combo": f"{opt}_{act}_{sizes}",
         "label": f"{OPT_LABELS[opt]} {ACT_LABELS[act]} {sizes}",
         "history_path": history_path,
-        "checkpoint_path": ARTIFACTS_DIR / f"ckpt_{opt}_{act}_{sizes}.npz",
+        "checkpoint_path": ARTIFACTS_DIR / f"ckpt_{opt}_{act}_{sizes}.pt",
     }
 
 

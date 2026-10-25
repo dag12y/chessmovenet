@@ -1,18 +1,17 @@
-"""Save and load model checkpoints and per-epoch training history."""
+"""Save and load PyTorch model checkpoints and per-epoch training history."""
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import numpy as np
+import torch
 
-from chessmovenet.model import PARAMETER_NAMES, ChessMoveNet
+from chessmovenet.model import ChessMoveNet
 
-# Required history columns; epochs are generated if omitted.
+CHECKPOINT_FORMAT = "chessmovenet-pytorch-v1"
+CHECKPOINT_SUFFIXES = {".pt", ".pth"}
 HISTORY_KEYS = ("epoch", "train_loss", "val_loss", "seconds")
-
-# Optional columns preserve compatibility with older history files.
 OPTIONAL_HISTORY_KEYS = (
     "train_acc_top1",
     "train_acc_top5",
@@ -21,14 +20,16 @@ OPTIONAL_HISTORY_KEYS = (
 )
 
 
-def _check_npz_path(path, role: str) -> Path:
-    """Normalize ``path`` to a ``Path`` and require an ``.npz`` suffix.
+def _check_checkpoint_path(path, role: str) -> Path:
+    path = Path(path)
+    if path.suffix not in CHECKPOINT_SUFFIXES:
+        raise ValueError(
+            f"{role} path must end in .pt or .pth, got {str(path)!r}"
+        )
+    return path
 
-    ``np.savez`` silently appends ``.npz`` to names that lack it,
-    which would make the path you checked differ from the file actually
-    written.  Refusing up front keeps "the path I passed" and "the file
-    on disk" the same thing.
-    """
+
+def _check_npz_path(path, role: str) -> Path:
     path = Path(path)
     if path.suffix != ".npz":
         raise ValueError(f"{role} path must end in .npz, got {str(path)!r}")
@@ -36,7 +37,6 @@ def _check_npz_path(path, role: str) -> Path:
 
 
 def _check_writable(path: Path, overwrite: bool) -> None:
-    """Create parent directories; refuse to clobber unless allowed."""
     if path.exists() and not overwrite:
         raise FileExistsError(
             f"{path} already exists; pass overwrite=True to replace it "
@@ -45,156 +45,86 @@ def _check_writable(path: Path, overwrite: bool) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def _torch_load(path: Path, map_location):
+    try:
+        return torch.load(path, map_location=map_location, weights_only=True)
+    except TypeError:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except Exception:
+        return torch.load(path, map_location=map_location, weights_only=False)
+
+
 def save_checkpoint(
     path, net: ChessMoveNet, *, overwrite: bool = False
 ) -> None:
-    """Save all network parameters and architecture metadata to ``path``.
-
-    Args:
-        path: Destination file; must end in ``.npz``.  Missing parent
-            directories (e.g. ``artifacts/``) are created.
-        net: The network whose numbered weights and biases are stored as
-            float32, along with its activation name.
-        overwrite: When False (the default) an existing file raises
-            ``FileExistsError`` instead of being replaced.
-
-    Raises:
-        ValueError: If ``path`` does not end in ``.npz``.
-        FileExistsError: If ``path`` exists and ``overwrite`` is False.
-    """
-    path = _check_npz_path(path, "checkpoint")
+    """Save architecture metadata and ``state_dict`` to a ``.pt`` file."""
+    path = _check_checkpoint_path(path, "checkpoint")
     _check_writable(path, overwrite)
-
-    arrays = {
-        name: np.asarray(getattr(net, name), dtype=np.float32)
-        for name in net.parameter_names
+    payload = {
+        "format": CHECKPOINT_FORMAT,
+        "input_size": int(net.input_size),
+        "hidden_sizes": tuple(int(width) for width in net.hidden_sizes),
+        "output_size": int(net.output_size),
+        "activation": str(net.activation),
+        "state_dict": {key: value.detach().cpu() for key, value in net.state_dict().items()},
     }
-    # Keep activation metadata as a string scalar; older files default to ReLU.
-    arrays["activation"] = np.asarray(net.activation)
-    np.savez(path, **arrays)
+    torch.save(payload, path)
 
 
-def load_checkpoint(path) -> ChessMoveNet:
-    """Rebuild a :class:`ChessMoveNet` from a checkpoint saved earlier.
+def load_checkpoint(path, map_location="cpu") -> ChessMoveNet:
+    """Rebuild a :class:`ChessMoveNet` from a ``.pt`` checkpoint.
 
-    The architecture itself is *derived from the stored shapes*
-    (``W1`` is ``input x hidden``, ``W2`` is ``hidden x output``), then
-    every array is cross-checked so a corrupt or mismatched file fails
-    with a specific message instead of a mysterious downstream error.
-
-    Args:
-        path: A ``.npz`` file written by :func:`save_checkpoint`.
-
-    Returns:
-        A **fresh** network with parameters bit-identical to the saved
-        one (``seed`` is irrelevant -- all weights are overwritten).
-
-    Raises:
-        FileNotFoundError: If ``path`` does not exist.
-        ValueError: If a parameter array is missing or the arrays are
-            not mutually consistent (wrong dimensionality, shapes that
-            do not chain ``input -> hidden -> output``).
+    ``map_location`` defaults to CPU so a model trained on NVIDIA GPU can be
+    loaded on a machine that only has CPU.
     """
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(f"no checkpoint found at {path}")
 
-    # Checkpoints use plain arrays and never require pickle.
-    with np.load(path, allow_pickle=False) as stored:
-        weight_layers = sorted(
-            int(match.group(1))
-            for key in stored.files
-            if (match := re.fullmatch(r"W([1-9][0-9]*)", key))
-        )
-        if not weight_layers or weight_layers != list(
-            range(1, len(weight_layers) + 1)
-        ) or len(weight_layers) < 2:
-            raise ValueError(
-                f"checkpoint {path} must contain consecutive W1..WL arrays "
-                "for at least one hidden layer and one output layer"
-            )
-        parameter_names = tuple(
-            name
-            for layer in weight_layers
-            for name in (f"W{layer}", f"b{layer}")
-        )
-        missing = [key for key in parameter_names if key not in stored.files]
-        if missing:
-            raise ValueError(
-                f"checkpoint {path} is missing parameter array(s): {missing}"
-            )
-        arrays = {
-            name: np.asarray(stored[name], dtype=np.float32)
-            for name in parameter_names
-        }
-        activation = (
-            str(np.asarray(stored["activation"]).item())
-            if "activation" in stored.files
-            else "relu"
+    stored = _torch_load(path, map_location=map_location)
+    if not isinstance(stored, dict):
+        raise ValueError(f"checkpoint {path} is not a ChessMoveNet payload")
+
+    required = (
+        "input_size",
+        "hidden_sizes",
+        "output_size",
+        "activation",
+        "state_dict",
+    )
+    missing = [key for key in required if key not in stored]
+    if missing:
+        raise ValueError(
+            f"checkpoint {path} is missing parameter array(s): {missing}"
         )
 
-    weights = [arrays[f"W{layer}"] for layer in weight_layers]
-    biases = [arrays[f"b{layer}"] for layer in weight_layers]
-    for index, (weight, bias) in enumerate(zip(weights, biases), start=1):
-        if weight.ndim != 2:
-            raise ValueError(f"W{index} must be 2-D, got {weight.ndim}-D")
-        if bias.shape != (weight.shape[1],):
-            raise ValueError(
-                f"b{index} has shape {bias.shape}, but W{index} implies "
-                f"width {weight.shape[1]}"
-            )
-        if index > 1 and weights[index - 2].shape[1] != weight.shape[0]:
-            raise ValueError(
-                f"W{index} expects {weight.shape[0]} inputs, but the "
-                f"previous layer produces {weights[index - 2].shape[1]}"
-            )
+    state_dict = stored["state_dict"]
+    if not isinstance(state_dict, dict) or not state_dict:
+        raise ValueError(f"checkpoint {path} has an empty or invalid state_dict")
 
-    hidden_sizes = tuple(weight.shape[1] for weight in weights[:-1])
+    hidden_sizes = tuple(int(width) for width in stored["hidden_sizes"])
     net = ChessMoveNet(
-        input_size=weights[0].shape[0],
+        input_size=int(stored["input_size"]),
         hidden_size=hidden_sizes[0],
         hidden_sizes=hidden_sizes,
-        output_size=weights[-1].shape[1],
+        output_size=int(stored["output_size"]),
         seed=0,
-        activation=activation,
+        activation=str(stored["activation"]),
     )
-    for name, array in arrays.items():
-        setattr(net, name, array)
+    try:
+        net.load_state_dict(state_dict, strict=True)
+    except RuntimeError as exc:
+        message = str(exc)
+        if "size mismatch" in message or "Missing key" in message:
+            raise ValueError(message) from exc
+        raise
+    net.to(torch.device(map_location) if isinstance(map_location, str) else map_location)
+    net.eval()
     return net
 
 
 def save_history(path, history: dict, *, overwrite: bool = False) -> None:
-    """Save per-epoch training records to ``path`` (a ``.npz`` file).
-
-    Accepts exactly what :func:`chessmovenet.train.train` returns --
-    ``{"train_loss": [...], "val_loss": [...], "seconds": [...]}`` --
-    and stores them alongside a derived ``epoch`` counter (``1..N``).
-    A pre-existing ``"epoch"`` key is kept as-is.  The Step-11 accuracy
-    columns (:data:`OPTIONAL_HISTORY_KEYS`), when present, are saved
-    too; when absent (older runs, like the 3-epoch baseline), the file
-    simply has no accuracy columns and still loads fine.
-
-    Validation happens *before* the file is touched, so a history that
-    is malformed (missing keys, ragged lengths, NaN from a diverged
-    run) produces a ``ValueError`` and leaves no half-written file
-    behind.
-
-    Args:
-        path: Destination file; must end in ``.npz``.  Missing parent
-            directories are created.
-        history: Mapping whose ``train_loss``, ``val_loss`` and
-            ``seconds`` are equal-length, 1-D, finite sequences with at
-            least one epoch.
-        overwrite: When False (default), an existing file raises
-            ``FileExistsError``.
-
-    Raises:
-        TypeError: If ``history`` is not a dict.
-        ValueError: If a required key is missing, lengths differ, a
-            sequence is empty or not 1-D, a value is not finite, or
-            ``path`` does not end in ``.npz``.
-        FileExistsError: If ``path`` exists and ``overwrite`` is False.
-    """
+    """Save per-epoch training records to ``path`` (a ``.npz`` file)."""
     path = _check_npz_path(path, "history")
     if not isinstance(history, dict):
         raise TypeError(
@@ -208,7 +138,6 @@ def save_history(path, history: dict, *, overwrite: bool = False) -> None:
             f"(need {list(HISTORY_KEYS)})"
         )
 
-    # Write required columns before optional accuracy columns.
     keys = list(HISTORY_KEYS[1:]) + [
         k for k in OPTIONAL_HISTORY_KEYS if k in history
     ]
@@ -267,28 +196,11 @@ def save_history(path, history: dict, *, overwrite: bool = False) -> None:
         epoch = np.arange(1, n + 1, dtype=np.int64)
 
     _check_writable(path, overwrite)
-    # Save only the validated columns.
     np.savez(path, epoch=epoch, **columns)
 
 
 def load_history(path) -> dict[str, list]:
-    """Load a history saved by :func:`save_history`.
-
-    Args:
-        path: A ``.npz`` file written by :func:`save_history`.
-
-    Returns:
-        A dict with the four keys of :data`HISTORY_KEYS`, each a Python
-        list (``epoch`` ints; losses and durations floats) -- ready for
-        plotting or printing.  Any accuracy columns the file contains
-        (:data:`OPTIONAL_HISTORY_KEYS`) are included as well; files
-        saved before Step 11 simply lack them.
-
-    Raises:
-        FileNotFoundError: If ``path`` does not exist.
-        ValueError: If a key is missing, a column is not 1-D, lengths
-            disagree, or values are not finite.
-    """
+    """Load a history saved by :func:`save_history`."""
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(f"no history file found at {path}")
@@ -345,5 +257,3 @@ def load_history(path) -> dict[str, list]:
         )
         for key in HISTORY_KEYS + tuple(extra)
     }
-
-

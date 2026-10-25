@@ -367,6 +367,33 @@ def test_bundle_dates_come_from_pgn_headers(tmp_path) -> None:
     assert [g.time for g in games] == ["10:00:00", ""]
 
 
+def test_variant_games_are_skipped(tmp_path) -> None:
+    """A 3-check game adds no bundle even when the user played it."""
+    pgn_path = write_pgn(
+        tmp_path,
+        [
+            game_block("2024.06.01", "1. e4 e5"),
+            (
+                '[Event "Live Chess - Three-Check"]\n'
+                '[Site "Chess.com"]\n'
+                '[Date "2024.06.02"]\n'
+                '[White "dag12yi"]\n'
+                '[Black "Opponent"]\n'
+                '[Variant "3-check"]\n'
+                '[SetUp "1"]\n'
+                '[FEN "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 +0+0"]\n'
+                '[Result "*"]\n'
+                "\n1. e4 e5 *\n\n"
+            ),
+        ],
+    )
+
+    games = build_per_game_dataset(pgn_path, "dag12yi")
+
+    assert len(games) == 1
+    assert games[0].date == "2024.06.01"
+
+
 def test_non_player_games_are_skipped(tmp_path) -> None:
     """A game the user did not play adds no bundle and no rows."""
     pgn_path = write_pgn(

@@ -14,6 +14,7 @@ import sys
 
 import numpy as np
 import pytest
+import torch
 
 from chessmovenet.checkpoint import load_checkpoint, load_history
 from chessmovenet.model import ChessMoveNet
@@ -444,7 +445,7 @@ def test_main_trains_saves_and_reports_on_synthetic_data(
     """Happy path: 1 epoch on the tiny split, both artifacts written
     and loadable, informative output."""
     data = _write_tiny_split(tmp_path)
-    ckpt = tmp_path / "out" / "model.npz"  # 'out/' does not exist yet
+    ckpt = tmp_path / "out" / "model.pt"  # 'out/' does not exist yet
     hist = tmp_path / "out" / "history.npz"
 
     out, _ = _run_main(
@@ -479,7 +480,7 @@ def test_main_refuses_existing_outputs_before_touching_any_data(
     """Fail fast: an existing checkpoint without --overwrite must abort
     with a clear message BEFORE loading data (the --data path here does
     not even exist, so any attempt to load it would crash instead)."""
-    ckpt = tmp_path / "model.npz"
+    ckpt = tmp_path / "model.pt"
     ckpt.write_bytes(b"precious previous run")
     hist = tmp_path / "history.npz"
 
@@ -510,7 +511,7 @@ def test_main_rejects_output_paths_without_npz_suffix(
         )
 
     assert exc.value.code == 2
-    assert ".npz" in capsys.readouterr().err
+    assert ".pt" in capsys.readouterr().err
 
 
 def test_main_overwrite_flag_replaces_existing_outputs(
@@ -518,9 +519,9 @@ def test_main_overwrite_flag_replaces_existing_outputs(
 ) -> None:
     """--overwrite is the explicit escape hatch and really replaces."""
     data = _write_tiny_split(tmp_path)
-    ckpt = tmp_path / "model.npz"
+    ckpt = tmp_path / "model.pt"
     hist = tmp_path / "history.npz"
-    np.savez(ckpt, junk=np.zeros(1))  # stale files from an old run
+    torch.save({"junk": torch.zeros(1)}, ckpt)  # stale files from an old run
     np.savez(hist, junk=np.zeros(1))
 
     out, _ = _run_main(
@@ -534,10 +535,12 @@ def test_main_overwrite_flag_replaces_existing_outputs(
     )
 
     assert "saved checkpoint ->" in out
-    with np.load(ckpt, allow_pickle=False) as stored:
-            assert set(stored.files) == {"W1", "b1", "W2", "b2", "activation"}
-    with np.load(hist, allow_pickle=False) as stored:
-        assert set(stored.files) == {
+    stored = torch.load(ckpt, map_location="cpu", weights_only=True)
+    assert "state_dict" in stored
+    state_dict = stored["state_dict"]
+    assert set(state_dict.keys()) == {"layers.0.weight", "layers.0.bias", "layers.1.weight", "layers.1.bias"}
+    with np.load(hist, allow_pickle=False) as stored_hist:
+        assert set(stored_hist.files) == {
             "epoch", "train_loss", "val_loss", "seconds",
             "train_acc_top1", "train_acc_top5",
             "val_acc_top1", "val_acc_top5",

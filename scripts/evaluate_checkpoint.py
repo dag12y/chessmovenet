@@ -12,7 +12,7 @@ from chessmovenet.train import evaluate_accuracy, evaluate_loss
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", default="artifacts/checkpoint_ep15.npz")
+    parser.add_argument("--checkpoint", default="artifacts/checkpoint_latest.pt")
     parser.add_argument("--data", default="data/processed/split.npz")
     parser.add_argument("--batch-size", type=int, default=128)
     args = parser.parse_args()

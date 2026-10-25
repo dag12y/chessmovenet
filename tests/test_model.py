@@ -665,7 +665,7 @@ def test_numerical_gradient_check_on_a_tiny_network() -> None:
     eps = 1e-5
     for name in ("W1", "b1", "W2", "b2"):
         parameter = getattr(net, name)
-        numeric = np.empty_like(parameter)
+        numeric = np.empty_like(np.asarray(parameter))
         for index in np.ndindex(parameter.shape):
             original = parameter[index]
 

@@ -3,7 +3,7 @@ PYTHONPATH := src
 VENV_ACTIVATE := .venv/bin/activate
 SHELL := /bin/bash
 EPOCHS ?= 3
-CHECKPOINT ?= artifacts/checkpoint_latest.npz
+CHECKPOINT ?= artifacts/checkpoint_latest.pt
 HISTORY ?= artifacts/history_latest.npz
 USERNAME ?=
 DATA ?= data/processed/split.npz
@@ -56,6 +56,7 @@ train:
 	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m chessmovenet.train \
 		--epochs $(EPOCHS) --batch-size 128 --lr 0.001 --seed 0 \
 		--optimizer $(OPTIMIZER) --activation $(ACTIVATION) --hidden-sizes $(HIDDEN_SIZES) \
+		--device auto \
 		--checkpoint $(CHECKPOINT) --history $(HISTORY)
 
 plot:
@@ -73,7 +74,7 @@ web:
 
 # Play against the model: starts the API (best Adam Tanh checkpoint) and the
 # frontend together. Override the checkpoint with: make play PLAY_CHECKPOINT=...
-PLAY_CHECKPOINT ?= artifacts/ckpt_adam_tanh_256.npz
+PLAY_CHECKPOINT ?= artifacts/checkpoint_latest.pt
 
 play:
 	@echo "Starting ChessMoveNet API with checkpoint $(PLAY_CHECKPOINT)..."
